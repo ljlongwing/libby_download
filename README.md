@@ -1,10 +1,24 @@
 # Libby Audiobook Downloader
 
-This tool helps you download your borrowed audiobooks from Libby (libbyapp.com) and save them to your computer as MP3 files. It automatically handles the login, gets the book's information (like the narrator and cover art), and can even split the book into separate chapters for you.
+This tool helps you download your borrowed audiobooks from Libby (libbyapp.com) and save them to your computer as MP3 files.
 
 ---
 
-## 1. Things You’ll Need
+## 🚀 Quick Start (No Python Required)
+
+If you don't want to install Python, you can download the "standalone" version for your computer:
+
+1.  Go to the **[Releases](https://github.com/ljlongwing/libby_download/releases)** page.
+2.  Download the file for your system:
+    *   **Windows**: Download `LibbyDownloader.exe`
+    *   **Linux**: Download `LibbyDownloader`
+3.  Double-click the file to start!
+
+*Note: You may still need to install **FFmpeg** if you want the tool to split the book into chapters (see below).*
+
+---
+
+## 🛠️ Option 2: Run with Python (Advanced)
 
 Before you start, you need to install a few free pieces of software on your computer:
 
@@ -12,6 +26,11 @@ Before you start, you need to install a few free pieces of software on your comp
 This is the "engine" that runs the downloader script.
 - **Windows**: Download the latest version from [python.org](https://www.python.org/downloads/windows/). During installation, **make sure to check the box that says "Add Python to PATH"**.
 - **Linux**: Most Linux systems already have this. If not, run `sudo apt install python3 python3-pip` (on Ubuntu/Debian).
+
+### Browser (Required)
+The tool uses a web browser in the background to talk to Libby.
+- It will automatically look for **Google Chrome**, **Microsoft Edge**, or **Brave Browser** on your computer.
+- If you don't have those, the tool will install its own "helper browser" during the setup step.
 
 ### FFmpeg (Optional but Recommended)
 This is used if you want the tool to split the one big audiobook file into individual chapter files.
