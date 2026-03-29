@@ -1,0 +1,13 @@
+#!/bin/bash
+echo "==========================================="
+echo "  Libby Audiobook Downloader"
+echo "==========================================="
+echo ""
+echo "Starting the downloader..."
+echo ""
+python3 libby_dl.py --out "./MyBooks"
+echo ""
+echo "==========================================="
+echo "  Process Finished."
+echo "==========================================="
+read -p "Press Enter to close..."

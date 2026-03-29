@@ -1,0 +1,27 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+ENV/
+
+# --- Project Specific ---
+# IMPORTANT: This file contains your Libby login tokens/secrets
+.libby_session.json
+
+# Default output folders for books
+MyBooks/
+libby_downloads/
+
+# Leftover temporary artwork
+coverArt.jpg
+
+# --- Java (Legacy) ---
+legacy_java_tool/
+
+# --- System Files ---
+.DS_Store
+Thumbs.db
+*.log
