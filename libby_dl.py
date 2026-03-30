@@ -2,6 +2,11 @@
 """
 libby_dl.py – Automated Libby audiobook downloader.
 
+EDUCATIONAL PURPOSES ONLY:
+This tool is intended for personal, educational use. 
+It requires the user to have a valid, active loan for any accessed material.
+Redistribution of copyrighted content is strictly prohibited.
+
 Workflow
 --------
 1. Open a Chromium browser via Playwright.
@@ -80,6 +85,12 @@ class LibbyDownloader:
     # ------------------------------------------------------------------
 
     async def run(self) -> None:
+        print("\n" + "=" * 60)
+        print("  Libby Audiobook Downloader (Educational Use Only)")
+        print("  Disclaimer: This tool requires a valid, active loan.")
+        print("  By using this tool, you agree to follow the Libby TOS.")
+        print("=" * 60 + "\n")
+
         async with async_playwright() as pw:
             browser_candidates = [
                 # Brave — Windows

@@ -1,5 +1,15 @@
 # Libby Audiobook Downloader
 
+This tool is provided for **educational purposes only**. It is designed to demonstrate how web automation and network traffic analysis can be used to interact with web applications. 
+
+### ⚖️ Disclaimer
+*   **Active Loan Required:** This tool is intended only for users who have a **valid, active loan** for the audiobook they are accessing through [libbyapp.com](https://libbyapp.com). 
+*   **Personal Use Only:** Any files downloaded using this tool should be for your own personal, private use. Redistribution of copyrighted material is a violation of copyright law and the Terms of Service of your library and Libby.
+*   **No Affiliation:** This project is **not** affiliated with, endorsed by, or supported by Libby, OverDrive, or any library system.
+*   **User Responsibility:** By using this tool, you agree to comply with all applicable laws and the Terms of Service of the platforms you are accessing. The author assumes no liability for misuse of this tool.
+
+---
+
 This tool helps you download your borrowed audiobooks from Libby (libbyapp.com) and save them to your computer as MP3 files.
 
 ---
