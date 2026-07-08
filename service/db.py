@@ -1,8 +1,10 @@
-"""SQLite persistence for the Libby auto-download service.
+"""SQLite persistence for the multi-source (Libby + Chirp) auto-download
+service.
 
-Tracks which loans have already been downloaded (so the worker's periodic
-shelf scan doesn't re-download them) plus a small history log, and holds
-the handful of user-editable settings (output directory, scan interval).
+Tracks which loans/purchases have already been downloaded (so each
+source's periodic scan doesn't re-download them) plus a small history log,
+and holds the handful of user-editable settings (output directory, one
+scan interval per source).
 """
 
 import os
@@ -14,13 +16,14 @@ from typing import Optional
 
 DB_PATH = Path(os.environ.get("LIBBY_SERVICE_DB", "/data/db/service.db"))
 
-# loan_id (book["id"] from LibbyDownloader._get_shelf) is the one field
-# reliably present across all three shelf-scraping strategies; card_id is
-# only populated by the primary JSON-API strategy, so it's kept as
-# informational metadata rather than part of the primary key.
+# loan_id is source-specific: Libby's stable numeric loan id, or Chirp's
+# player href (e.g. "/player/34151152") -- Chirp has no equivalent numeric
+# id in its shelf listing. Scoping the primary key by source means the two
+# id schemes can never collide, even coincidentally.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS books (
-    loan_id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,          -- 'libby' | 'chirp'
+    loan_id TEXT NOT NULL,
     card_id TEXT,
     title TEXT,
     author TEXT,
@@ -29,7 +32,8 @@ CREATE TABLE IF NOT EXISTS books (
     output_path TEXT,
     first_seen_at TEXT NOT NULL,
     downloaded_at TEXT,
-    on_shelf INTEGER NOT NULL DEFAULT 0   -- 1 if seen on the shelf in the most recent scan
+    on_shelf INTEGER NOT NULL DEFAULT 0,   -- 1 if seen on the shelf/library in the most recent scan
+    PRIMARY KEY (source, loan_id)
 );
 
 CREATE TABLE IF NOT EXISTS config (
@@ -40,19 +44,23 @@ CREATE TABLE IF NOT EXISTS config (
 
 DEFAULT_CONFIG = {
     # A dedicated mount point (separate from /data, which holds the session
-    # file and this database) so it can be bind-mounted straight at wherever
-    # your audiobook library actually lives on the host -- see BOOKS_DIR in
-    # docker-compose.yml. Changing this value on the Config page only moves
-    # where *inside the container* downloads land; it does not create a new
-    # host mount, so it must point at a path that's actually mounted.
+    # files and this database) so it can be bind-mounted straight at
+    # wherever your audiobook library actually lives on the host -- see
+    # BOOKS_DIR in docker-compose.yml. Changing this value on the Config
+    # page only moves where *inside the container* downloads land; it does
+    # not create a new host mount, so it must point at a path that's
+    # actually mounted. Shared between sources since each book already
+    # nests under its own <Source Book Name>/ subfolder.
     "output_dir": "/books",
-    "scan_interval_minutes": "15",
+    "libby_scan_interval_minutes": "15",
+    "chirp_scan_interval_minutes": "15",
 }
 
 
 def init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _connect() as conn:
+        _migrate(conn)
         conn.executescript(SCHEMA)
         for key, value in DEFAULT_CONFIG.items():
             conn.execute(
@@ -63,6 +71,42 @@ def init_db() -> None:
             conn.execute("ALTER TABLE books ADD COLUMN on_shelf INTEGER NOT NULL DEFAULT 0")
         except sqlite3.OperationalError:
             pass  # column already exists
+        # Additive migration for installs from before scan_interval_minutes
+        # was split per-source: seed both new keys from the old single one.
+        old = conn.execute(
+            "SELECT value FROM config WHERE key = 'scan_interval_minutes'"
+        ).fetchone()
+        if old is not None:
+            conn.execute(
+                "INSERT OR IGNORE INTO config (key, value) VALUES ('libby_scan_interval_minutes', ?)",
+                (old["value"],),
+            )
+            conn.execute("DELETE FROM config WHERE key = 'scan_interval_minutes'")
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """One-time rebuild for installs from before the "source" column
+    existed. SQLite can't change a primary key via ALTER TABLE, so this
+    creates the new-shaped table, copies existing rows across (the only
+    source that has ever existed is 'libby'), and swaps it in. No-ops if
+    "books" doesn't exist yet (fresh install) or already has "source".
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(books)").fetchall()}
+    if not cols or "source" in cols:
+        return
+    conn.executescript(
+        SCHEMA.split("CREATE TABLE IF NOT EXISTS config")[0].replace(
+            "CREATE TABLE IF NOT EXISTS books", "CREATE TABLE books_new"
+        )
+    )
+    old_cols = cols - {"source"}
+    col_list = ", ".join(sorted(old_cols))
+    conn.execute(
+        f"INSERT INTO books_new (source, {col_list}) "
+        f"SELECT 'libby', {col_list} FROM books"
+    )
+    conn.execute("DROP TABLE books")
+    conn.execute("ALTER TABLE books_new RENAME TO books")
 
 
 @contextmanager
@@ -97,20 +141,21 @@ def get_all_config() -> dict:
         return {r["key"]: r["value"] for r in rows}
 
 
-def is_downloaded(loan_id: str) -> bool:
+def is_downloaded(source: str, loan_id: str) -> bool:
     with _connect() as conn:
         row = conn.execute(
-            "SELECT status FROM books WHERE loan_id = ?", (loan_id,)
+            "SELECT status FROM books WHERE source = ? AND loan_id = ?", (source, loan_id)
         ).fetchone()
         return bool(row) and row["status"] == "complete"
 
 
-def sync_shelf(books: list[dict]) -> None:
-    """Record the current shelf snapshot: on_shelf=1 for everything just
-    seen (creating a 'pending' row for titles never encountered before),
-    on_shelf=0 for anything previously tracked that's no longer present
-    (returned/expired). Called at the start of every scan so the dashboard
-    can show "what's on my shelf right now" independent of download history.
+def sync_shelf(source: str, books: list[dict]) -> None:
+    """Record the current shelf/library snapshot for this source: on_shelf=1
+    for everything just seen (creating a 'pending' row for titles never
+    encountered before), on_shelf=0 for anything previously tracked (for
+    this source) that's no longer present (returned/expired). Called at the
+    start of every scan so the dashboard can show "what's available right
+    now" independent of download history.
     """
     now = datetime.now(timezone.utc).isoformat()
     seen_ids = [b["loan_id"] for b in books if b.get("loan_id")]
@@ -120,45 +165,49 @@ def sync_shelf(books: list[dict]) -> None:
             if not loan_id:
                 continue
             existing = conn.execute(
-                "SELECT loan_id FROM books WHERE loan_id = ?", (loan_id,)
+                "SELECT loan_id FROM books WHERE source = ? AND loan_id = ?", (source, loan_id)
             ).fetchone()
             if existing:
                 conn.execute(
-                    "UPDATE books SET on_shelf = 1, title = ?, author = ?, card_id = ? WHERE loan_id = ?",
-                    (b.get("title", ""), b.get("author", ""), b.get("card_id", ""), loan_id),
+                    "UPDATE books SET on_shelf = 1, title = ?, author = ?, card_id = ? "
+                    "WHERE source = ? AND loan_id = ?",
+                    (b.get("title", ""), b.get("author", ""), b.get("card_id", ""), source, loan_id),
                 )
             else:
                 conn.execute(
-                    "INSERT INTO books (loan_id, card_id, title, author, status, first_seen_at, on_shelf) "
-                    "VALUES (?, ?, ?, ?, 'pending', ?, 1)",
-                    (loan_id, b.get("card_id", ""), b.get("title", ""), b.get("author", ""), now),
+                    "INSERT INTO books (source, loan_id, card_id, title, author, status, first_seen_at, on_shelf) "
+                    "VALUES (?, ?, ?, ?, ?, 'pending', ?, 1)",
+                    (source, loan_id, b.get("card_id", ""), b.get("title", ""), b.get("author", ""), now),
                 )
         if seen_ids:
             placeholders = ",".join("?" * len(seen_ids))
             conn.execute(
-                f"UPDATE books SET on_shelf = 0 WHERE loan_id NOT IN ({placeholders})",
-                seen_ids,
+                f"UPDATE books SET on_shelf = 0 WHERE source = ? AND loan_id NOT IN ({placeholders})",
+                [source, *seen_ids],
             )
         else:
-            conn.execute("UPDATE books SET on_shelf = 0")
+            conn.execute("UPDATE books SET on_shelf = 0 WHERE source = ?", (source,))
 
 
-def list_shelf() -> list[dict]:
+def list_shelf(source: str) -> list[dict]:
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT * FROM books WHERE on_shelf = 1 ORDER BY title COLLATE NOCASE"
+            "SELECT * FROM books WHERE source = ? AND on_shelf = 1 ORDER BY title COLLATE NOCASE",
+            (source,),
         ).fetchall()
         return [dict(r) for r in rows]
 
 
-def mark_for_redownload(loan_id: str) -> None:
+def mark_for_redownload(source: str, loan_id: str) -> None:
     with _connect() as conn:
         conn.execute(
-            "UPDATE books SET status = 'pending', error = NULL WHERE loan_id = ?", (loan_id,)
+            "UPDATE books SET status = 'pending', error = NULL WHERE source = ? AND loan_id = ?",
+            (source, loan_id),
         )
 
 
 def upsert_book(
+    source: str,
     loan_id: str,
     title: str,
     author: str,
@@ -171,21 +220,22 @@ def upsert_book(
     now = datetime.now(timezone.utc).isoformat()
     with _connect() as conn:
         existing = conn.execute(
-            "SELECT first_seen_at, downloaded_at FROM books WHERE loan_id = ?", (loan_id,)
+            "SELECT first_seen_at, downloaded_at FROM books WHERE source = ? AND loan_id = ?",
+            (source, loan_id),
         ).fetchone()
         first_seen_at = existing["first_seen_at"] if existing else now
         downloaded_at = now if mark_downloaded else (existing["downloaded_at"] if existing else None)
         conn.execute(
             """
             INSERT INTO books
-                (loan_id, card_id, title, author, status, error, output_path, first_seen_at, downloaded_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(loan_id) DO UPDATE SET
+                (source, loan_id, card_id, title, author, status, error, output_path, first_seen_at, downloaded_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source, loan_id) DO UPDATE SET
                 card_id=excluded.card_id, title=excluded.title, author=excluded.author,
                 status=excluded.status, error=excluded.error, output_path=excluded.output_path,
                 downloaded_at=excluded.downloaded_at
             """,
-            (loan_id, card_id, title, author, status, error, output_path, first_seen_at, downloaded_at),
+            (source, loan_id, card_id, title, author, status, error, output_path, first_seen_at, downloaded_at),
         )
 
 

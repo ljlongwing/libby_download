@@ -90,7 +90,7 @@ class ChirpDownloader:
         print("=" * 60 + "\n")
 
         async with async_playwright() as pw:
-            browser, context, page = await self._launch_browser_context(pw)
+            browser, context, page, player_page = await self._launch_browser_context(pw)
 
             try:
                 await self._ensure_authenticated(page, context)
@@ -105,7 +105,7 @@ class ChirpDownloader:
                     return
 
                 try:
-                    await self._download_selected_book(page, context, book)
+                    await self._download_selected_book(page, context, player_page, book)
                 except RuntimeError as e:
                     print(f"\n{e}")
                     return
@@ -123,8 +123,11 @@ class ChirpDownloader:
     async def _launch_browser_context(self, pw):
         """Launch a browser + context, loading a saved session if present.
 
-        Returns (browser, context, page). Unlike Libby's player, Chirp's
-        never opens a new tab, so no page-tracking holder is needed here.
+        Returns (browser, context, page, player_page_holder). Chirp's player
+        never opens a new tab (unlike Libby's), so player_page_holder is
+        just a 1-item list always pointing at the same page -- kept for
+        signature parity with LibbyDownloader so the service's worker can
+        drive either downloader through the same generic code path.
 
         Shared by the interactive run() and the batch/service worker, which
         want the exact same browser-discovery/session/anti-bot setup without
@@ -172,7 +175,7 @@ class ChirpDownloader:
         # books doesn't stack duplicate route handlers.
         await context.route("**/audio_proxy/web_player/**", self._route_handler)
 
-        return browser, context, page
+        return browser, context, page, [page]
 
     def _reset_for_next_book(self) -> None:
         """Clear per-book instance state so one ChirpDownloader instance can
@@ -186,11 +189,13 @@ class ChirpDownloader:
         self._chapter_bytes = {}
         self._chapter_events = {}
 
-    async def _download_selected_book(self, page, context, book: dict) -> None:
+    async def _download_selected_book(self, page, context, player_page, book: dict) -> None:
         """Download one book (a shelf entry dict from _get_shelf) using an
-        already-open page/context. Raises RuntimeError if no chapters could
-        be found or downloaded, so batch callers can log the failure and
-        move on to the next book instead of aborting the whole scan.
+        already-open page/context. player_page is accepted but unused
+        (Chirp never switches tabs) -- kept for signature parity with
+        LibbyDownloader. Raises RuntimeError if no chapters could be found
+        or downloaded, so batch callers can log the failure and move on to
+        the next book instead of aborting the whole scan.
         """
         self._reset_for_next_book()
 
@@ -290,8 +295,12 @@ class ChirpDownloader:
         try:
             url = page.url.lower()
             if "library" in url:
-                # Chirp uses .book-card or .library-item or has links to player
-                count = await page.locator(".book-card, .library-item, a[href*='/player/'], .library-books").count()
+                # Same selector _get_shelf() uses (verified against the real
+                # site's DOM) -- this used to check unverified guessed
+                # selectors (.book-card, .library-item, etc.) that never
+                # actually matched, so this always reported "not logged in"
+                # even with a valid session.
+                count = await page.locator('[data-testid="user-audiobook-card"]').count()
                 return count > 0
             return False
         except Exception:
