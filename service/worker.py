@@ -44,7 +44,15 @@ async def scan_once() -> dict:
     downloaded = failed = skipped = 0
     try:
         output_dir = db.get_config("output_dir")
-        downloader = libby_dl.LibbyDownloader(output_dir=output_dir, headless=True)
+        # headless=True was tried first but Libby's player doesn't fully
+        # initialize under real headless Chromium (found ~1 chapter instead
+        # of the full TOC, no play/TOC buttons, zero parts captured -- see
+        # commit history). Confirmed via local repro that the exact same
+        # bundled Chromium works correctly non-headless. The container
+        # already runs Xvfb (for the auth flow), so rendering into that
+        # virtual display gets the same real-browser behavior without
+        # needing anyone to actually be watching.
+        downloader = libby_dl.LibbyDownloader(output_dir=output_dir, headless=False)
 
         async with async_playwright() as pw:
             browser, context, page, player_page = await downloader._launch_browser_context(pw)
