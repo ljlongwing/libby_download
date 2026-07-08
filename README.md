@@ -4,6 +4,26 @@ This repo contains two related, standalone tools that are provided for **educati
 
 *   **`libby_dl.py`** — downloads your borrowed audiobooks from **Libby** (libbyapp.com).
 *   **`chirp_dl.py`** — downloads your purchased audiobooks from **Chirp Books** (chirpbooks.com).
+*   **`service/`** — an optional self-hosted web service that runs `libby_dl.py` automatically on a schedule (see below), so borrowing a book in Libby gets it downloaded without you running anything by hand.
+
+### 🐳 Automated download service (Docker)
+
+`service/` packages a small always-on service around `libby_dl.py`:
+
+- **Background scanning** — checks your Libby shelf every N minutes (configurable) and downloads anything new, skipping books it's already grabbed.
+- **Web dashboard** — status, a manual "Scan Now" button, and download **history**.
+- **In-browser (re-)authentication** — Libby login has to happen on Libby's own page (library card + PIN), so the container runs a real browser on a virtual display and streams it into the web UI via noVNC — you log in right there in your browser tab, no separate script or window needed, including whenever a session eventually expires.
+- **Config page** — change the output directory or scan interval without editing files.
+
+Run it with Docker Compose:
+
+```bash
+docker compose up --build -d
+```
+
+Then visit `http://<host>:8000`, go to **Authentication**, and log in. Everything (session, history, and by default your downloaded books) persists under `./data` on the host.
+
+This is newer and less battle-tested than the CLI tools above — if something's off, check `docker compose logs -f`.
 
 ### 🔒 Why isn't there a Hoopla downloader?
 Hoopla's audiobooks *and* video both stream through **Widevine/PlayReady DRM** (via castLabs DRMtoday — confirmed by inspecting the DASH manifest: `ContentProtection` / `cenc:default_KID` elements and real Widevine/PlayReady license requests to `patron-api-gateway.hoopladigital.com`). That's genuine content encryption, not just an access-token quirk like the ones these tools work around for Libby/Chirp, so building a downloader for it would mean circumventing DRM — illegal under DMCA §1201 regardless of having a valid loan. This isn't going to change, so there's no need to re-investigate it.

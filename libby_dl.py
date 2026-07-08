@@ -61,9 +61,13 @@ class LibbyDownloader:
         skip_minutes: float = 5.0,
     ) -> None:
         # self.output_dir starts as the base directory and is narrowed to
-        # base/<Book Name>/ once the book's title is known (see run()).
+        # base/<Book Name>/ once the book's title is known (see
+        # _download_selected_book()). self._base_output_dir is kept so a
+        # single instance can safely download more than one book in a row
+        # (see _reset_for_next_book()).
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self._base_output_dir = self.output_dir
         self.ffmpeg = ffmpeg
         self.headless = headless
         # Number of 15-second skip-forward clicks per batch when filling gaps.
@@ -95,77 +99,7 @@ class LibbyDownloader:
         print("=" * 60 + "\n")
 
         async with async_playwright() as pw:
-            browser_candidates = [
-                # Brave — Windows
-                Path(r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"),
-                Path.home() / r"AppData\Local\BraveSoftware\Brave-Browser\Application\brave.exe",
-                # Brave — Linux / macOS
-                Path("/usr/bin/brave-browser"),
-                Path("/usr/bin/brave"),
-                Path("/opt/brave.com/brave/brave"),
-                Path("/snap/bin/brave"),
-                Path("/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"),
-                # Chrome — Windows
-                Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
-                Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
-                Path.home() / r"AppData\Local\Google\Chrome\Application\chrome.exe",
-                # Chrome — Linux / macOS
-                Path("/usr/bin/google-chrome"),
-                Path("/usr/bin/google-chrome-stable"),
-                Path("/usr/bin/chromium-browser"),
-                Path("/usr/bin/chromium"),
-                Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-                # Edge — Windows
-                Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
-                Path(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"),
-                # Edge — Linux / macOS
-                Path("/usr/bin/microsoft-edge"),
-                Path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
-            ]
-            browser_path = next((str(p) for p in browser_candidates if p.exists()), None)
-
-            # Auto-fallback to headless if on Linux with no DISPLAY
-            if not self.headless and sys.platform == "linux" and not os.environ.get("DISPLAY"):
-                print("Warning: No X server detected ($DISPLAY is not set).")
-                print("Falling back to headless mode. (Note: Login may be impossible if required.)")
-                self.headless = True
-
-            launch_kwargs: dict = {
-                "headless": self.headless,
-                # Suppress automation indicators so sites treat this like a
-                # real browser session.
-                "args": [
-                    "--disable-blink-features=AutomationControlled",
-                    "--autoplay-policy=no-user-gesture-required",
-                    "--no-sandbox",
-                ],
-            }
-            if browser_path:
-                print(f"Using browser: {browser_path}")
-                launch_kwargs["executable_path"] = browser_path
-            else:
-                print("Warning: no system browser found — falling back to Playwright's bundled Chromium")
-            browser = await pw.chromium.launch(**launch_kwargs)
-
-            ctx_kwargs: dict = {}
-            if SESSION_FILE.exists():
-                print(f"Loading saved session from {SESSION_FILE}")
-                ctx_kwargs["storage_state"] = str(SESSION_FILE)
-
-            context = await browser.new_context(**ctx_kwargs)
-            # Hide the navigator.webdriver flag that sites use to detect automation.
-            await context.add_init_script(
-                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-            )
-            page = await context.new_page()
-
-            # Track any new tab/window the player opens.
-            player_page: list = [page]
-
-            def _on_new_page(new_pg) -> None:
-                player_page[0] = new_pg
-
-            context.on("page", _on_new_page)
+            browser, context, page, player_page = await self._launch_browser_context(pw)
 
             try:
                 await self._ensure_authenticated(page, context)
@@ -179,57 +113,11 @@ class LibbyDownloader:
                 if not book:
                     return
 
-                # Pre-populate metadata with shelf info as a baseline.
-                # Use a specific key to distinguish shelf title from scraped title.
-                self.shelf_title = book.get("title", "")
-                self.metadata["title"] = self.shelf_title
-                self.metadata["author"] = book.get("author", "")
-                self.metadata["cover_url"] = book.get("cover_url", "")
-
-                # Register request capture on the context (not just one page) so
-                # it covers new tabs and fires from the very first request,
-                # including Part 01.
-                context.on("request", self._on_request)
-
-                await self._open_player(page, book)
-
-                # If the player opened in a new tab, use that page.
-                active = player_page[0]
-                if active is not page:
-                    print("  Player opened in a new tab — switching to it.")
-                    try:
-                        await active.wait_for_load_state("load", timeout=60_000)
-                    except Exception:
-                        pass
-                    await active.wait_for_timeout(2_000)
-
-                await self._extract_bifocal(active)
-                await self._seek_through_book(active)
-
-                if not self.captured:
-                    print("\nNo audio parts were captured. Cannot continue.")
+                try:
+                    await self._download_selected_book(page, context, player_page, book)
+                except RuntimeError as e:
+                    print(f"\n{e}")
                     return
-
-                # Sort by part number so files download in order.
-                self.captured.sort(key=lambda x: _part_number(x["filename"]))
-                print(f"\nCaptured {len(self.captured)} part(s).")
-
-                # Prioritize a sane title.
-                m_title = self.metadata.get("title", "")
-                if not m_title or m_title.lower() in ("libby", "about this audiobook", "audiobook", "now reading", "open this title"):
-                    book_name = _safe(self.shelf_title)
-                else:
-                    book_name = _safe(m_title)
-
-                # Nest this book's files under their own subfolder so
-                # multiple downloads into the same --out don't pile up flat.
-                self.output_dir = self.output_dir / book_name
-                self.output_dir.mkdir(parents=True, exist_ok=True)
-
-                await self._download_all(book_name)
-                await self._verify_duration_and_refetch(active, book_name)
-                self._write_cue(book_name)
-                self._split_chapters(book_name)
 
             finally:
                 # Always persist the session (including IndexedDB where Libby
@@ -242,6 +130,168 @@ class LibbyDownloader:
                     except Exception:
                         pass
                 await browser.close()
+
+    async def _launch_browser_context(self, pw):
+        """Launch a browser + context, loading a saved session if present.
+
+        Returns (browser, context, page, player_page_holder). The holder is
+        a 1-item list that _on_new_page mutates when a site opens the player
+        in a new tab, so callers can always read player_page_holder[0] for
+        the tab that's actually active.
+
+        Shared by the interactive run() and the batch/service worker, which
+        want the exact same browser-discovery/session/anti-bot setup without
+        duplicating it.
+        """
+        browser_candidates = [
+            # Brave — Windows
+            Path(r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"),
+            Path.home() / r"AppData\Local\BraveSoftware\Brave-Browser\Application\brave.exe",
+            # Brave — Linux / macOS
+            Path("/usr/bin/brave-browser"),
+            Path("/usr/bin/brave"),
+            Path("/opt/brave.com/brave/brave"),
+            Path("/snap/bin/brave"),
+            Path("/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"),
+            # Chrome — Windows
+            Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+            Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
+            Path.home() / r"AppData\Local\Google\Chrome\Application\chrome.exe",
+            # Chrome — Linux / macOS
+            Path("/usr/bin/google-chrome"),
+            Path("/usr/bin/google-chrome-stable"),
+            Path("/usr/bin/chromium-browser"),
+            Path("/usr/bin/chromium"),
+            Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            # Edge — Windows
+            Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
+            Path(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"),
+            # Edge — Linux / macOS
+            Path("/usr/bin/microsoft-edge"),
+            Path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
+        ]
+        browser_path = next((str(p) for p in browser_candidates if p.exists()), None)
+
+        # Auto-fallback to headless if on Linux with no DISPLAY
+        if not self.headless and sys.platform == "linux" and not os.environ.get("DISPLAY"):
+            print("Warning: No X server detected ($DISPLAY is not set).")
+            print("Falling back to headless mode. (Note: Login may be impossible if required.)")
+            self.headless = True
+
+        launch_kwargs: dict = {
+            "headless": self.headless,
+            # Suppress automation indicators so sites treat this like a
+            # real browser session.
+            "args": [
+                "--disable-blink-features=AutomationControlled",
+                "--autoplay-policy=no-user-gesture-required",
+                "--no-sandbox",
+            ],
+        }
+        if browser_path:
+            print(f"Using browser: {browser_path}")
+            launch_kwargs["executable_path"] = browser_path
+        else:
+            print("Warning: no system browser found — falling back to Playwright's bundled Chromium")
+        browser = await pw.chromium.launch(**launch_kwargs)
+
+        ctx_kwargs: dict = {}
+        if SESSION_FILE.exists():
+            print(f"Loading saved session from {SESSION_FILE}")
+            ctx_kwargs["storage_state"] = str(SESSION_FILE)
+
+        context = await browser.new_context(**ctx_kwargs)
+        # Hide the navigator.webdriver flag that sites use to detect automation.
+        await context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
+        page = await context.new_page()
+
+        # Track any new tab/window the player opens.
+        player_page: list = [page]
+
+        def _on_new_page(new_pg) -> None:
+            player_page[0] = new_pg
+
+        context.on("page", _on_new_page)
+
+        # Register request capture on the context (not just one page) so it
+        # covers new tabs and fires from the very first request, including
+        # Part 01. Registered once here (not per-book) so a batch caller
+        # downloading several books doesn't stack duplicate listeners.
+        context.on("request", self._on_request)
+
+        return browser, context, page, player_page
+
+    def _reset_for_next_book(self) -> None:
+        """Clear per-book instance state so one LibbyDownloader instance can
+        safely download multiple books in a row (used by the batch/service
+        worker; the interactive CLI only ever downloads one book per run, so
+        this is a no-op difference for it beyond state already being fresh).
+        """
+        self.output_dir = self._base_output_dir
+        self.captured = []
+        self.captured_filenames = set()
+        self.metadata = {}
+        self.toc = {}
+        self.reading_order = []
+        self.total_book_duration = 0.0
+        self._toc_btn = None
+        self._toc_frame = None
+
+    async def _download_selected_book(self, page, context, player_page, book: dict) -> None:
+        """Download one book (a shelf entry dict from _get_shelf) using an
+        already-open page/context. Raises RuntimeError if no audio could be
+        captured, so batch callers can log the failure and move on to the
+        next book instead of aborting the whole scan.
+        """
+        self._reset_for_next_book()
+
+        # Pre-populate metadata with shelf info as a baseline.
+        # Use a specific key to distinguish shelf title from scraped title.
+        self.shelf_title = book.get("title", "")
+        self.metadata["title"] = self.shelf_title
+        self.metadata["author"] = book.get("author", "")
+        self.metadata["cover_url"] = book.get("cover_url", "")
+
+        await self._open_player(page, book)
+
+        # If the player opened in a new tab, use that page.
+        active = player_page[0]
+        if active is not page:
+            print("  Player opened in a new tab — switching to it.")
+            try:
+                await active.wait_for_load_state("load", timeout=60_000)
+            except Exception:
+                pass
+            await active.wait_for_timeout(2_000)
+
+        await self._extract_bifocal(active)
+        await self._seek_through_book(active)
+
+        if not self.captured:
+            raise RuntimeError("No audio parts were captured. Cannot continue.")
+
+        # Sort by part number so files download in order.
+        self.captured.sort(key=lambda x: _part_number(x["filename"]))
+        print(f"\nCaptured {len(self.captured)} part(s).")
+
+        # Prioritize a sane title.
+        m_title = self.metadata.get("title", "")
+        if not m_title or m_title.lower() in ("libby", "about this audiobook", "audiobook", "now reading", "open this title"):
+            book_name = _safe(self.shelf_title)
+        else:
+            book_name = _safe(m_title)
+
+        # Nest this book's files under their own subfolder so multiple
+        # downloads into the same --out don't pile up flat.
+        self.output_dir = self._base_output_dir / book_name
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        await self._download_all(book_name)
+        await self._verify_duration_and_refetch(active, book_name)
+        self._write_cue(book_name)
+        self._split_chapters(book_name)
 
     # ------------------------------------------------------------------
     # Authentication
@@ -299,6 +349,37 @@ class LibbyDownloader:
             )
         except Exception:
             return False
+
+    async def _wait_for_login(self, page: Page, context: BrowserContext, timeout_s: float = 600) -> bool:
+        """Non-blocking variant of _ensure_authenticated's manual-login wait,
+        for callers (the web service's auth flow) that can't use input() —
+        there's no terminal to type into. Polls _is_logged_in() and requires
+        it to hold for a few consecutive checks before accepting, so a
+        mid-redirect false positive during the login flow doesn't save a
+        bogus session (this bit us during manual testing: a one-shot check
+        can catch the page between redirects on Libby's login sequence).
+
+        Saves the session and returns True once confirmed; returns False if
+        timeout_s elapses first (session is not saved in that case).
+        """
+        consecutive_ok = 0
+        elapsed = 0.0
+        interval = 3.0
+        while elapsed < timeout_s:
+            await page.wait_for_timeout(int(interval * 1000))
+            elapsed += interval
+            if await self._is_logged_in(page):
+                consecutive_ok += 1
+            else:
+                consecutive_ok = 0
+            if consecutive_ok >= 3:
+                try:
+                    await context.storage_state(path=str(SESSION_FILE), indexed_db=True)
+                except Exception:
+                    await context.storage_state(path=str(SESSION_FILE))
+                print(f"Session saved to {SESSION_FILE}\n")
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # Shelf

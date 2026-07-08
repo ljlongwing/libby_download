@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>History</h1>
+<table>
+  <thead>
+    <tr><th>Title</th><th>Author</th><th>Status</th><th>First Seen</th><th>Downloaded</th><th>Output</th></tr>
+  </thead>
+  <tbody>
+    {% for b in books %}
+    <tr>
+      <td>{{ b.title }}</td>
+      <td>{{ b.author }}</td>
+      <td class="status-{{ b.status }}">{{ b.status }}{% if b.error %} ({{ b.error }}){% endif %}</td>
+      <td>{{ b.first_seen_at }}</td>
+      <td>{{ b.downloaded_at or '' }}</td>
+      <td>{{ b.output_path or '' }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6">No books yet.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

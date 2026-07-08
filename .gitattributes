@@ -1,0 +1,4 @@
+# entrypoint.sh runs inside a Linux container; CRLF line endings there cause
+# a "bad interpreter" failure on the #!/bin/bash shebang line. Force LF
+# regardless of core.autocrlf on whatever machine clones/checks this out.
+*.sh text eol=lf

@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Authentication</h1>
+<p id="status">{{ status.message }}</p>
+
+<button id="loginBtn" onclick="startLogin()">Log In / Re-authenticate</button>
+
+<div id="vncWrap" style="display:none; margin-top:1rem;">
+  <p>Log in to Libby below, just like you would in a normal browser tab. Once your shelf is visible, this page updates itself automatically.</p>
+  <iframe id="vnc"></iframe>
+</div>
+
+<script>
+const vncPort = {{ vnc_port }};
+
+function vncUrl() {
+  return `http://${window.location.hostname}:${vncPort}/vnc.html?autoconnect=true&resize=scale`;
+}
+
+async function startLogin() {
+  const vnc = document.getElementById('vnc');
+  vnc.src = vncUrl();
+  document.getElementById('vncWrap').style.display = 'block';
+  await fetch('/auth/start', {method: 'POST'});
+  poll();
+}
+
+async function poll() {
+  const resp = await fetch('/auth/status');
+  const data = await resp.json();
+  document.getElementById('status').textContent = data.message;
+  if (data.in_progress) {
+    setTimeout(poll, 2000);
+  } else if (data.authenticated) {
+    document.getElementById('vncWrap').style.display = 'none';
+  }
+}
+
+poll();
+</script>
+{% endblock %}

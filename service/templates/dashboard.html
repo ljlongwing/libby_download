@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Dashboard</h1>
+
+<p>
+  Status:
+  {% if authenticated %}
+    <strong style="color:#1a7f37">Authenticated</strong>
+  {% else %}
+    <strong style="color:#c00">Not authenticated</strong> &mdash; <a href="/auth">log in</a>
+  {% endif %}
+</p>
+
+{% if scan_running %}
+<p>A scan is currently running&hellip;</p>
+{% elif last_scan %}
+<p>Last scan result: {{ last_scan }}</p>
+{% else %}
+<p>No scan has run yet.</p>
+{% endif %}
+
+<form method="post" action="/scan">
+  <button type="submit" {% if not authenticated %}disabled{% endif %}>Scan Now</button>
+</form>
+{% endblock %}

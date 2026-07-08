@@ -1,0 +1,13 @@
+services:
+  libby-service:
+    build: .
+    ports:
+      - "8000:8000"   # web UI (dashboard / auth / history / config)
+      - "6080:6080"   # noVNC, embedded as an iframe by the auth page
+    volumes:
+      # Session file (.libby_session.json), the SQLite history/config db,
+      # and (by default) the downloaded books all live under here so they
+      # survive container restarts/rebuilds. If you change the "Output
+      # directory" config to a path outside /data, add another volume for it.
+      - ./data:/data
+    restart: unless-stopped
