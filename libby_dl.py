@@ -192,7 +192,7 @@ class LibbyDownloader:
             print(f"Using browser: {browser_path}")
             launch_kwargs["executable_path"] = browser_path
         else:
-            print("Warning: no system browser found — falling back to Playwright's bundled Chromium")
+            print("No system browser found — using Playwright's bundled Chromium.")
         browser = await pw.chromium.launch(**launch_kwargs)
 
         ctx_kwargs: dict = {}
