@@ -21,7 +21,12 @@ Run it with Docker Compose:
 docker compose up --build -d
 ```
 
-Then visit `http://<host>:8000`, go to **Authentication**, and log in. Everything (session, history, and by default your downloaded books) persists under `./data` on the host.
+Then visit `http://<host>:8000`, go to **Authentication**, and log in.
+
+**Where things persist on the host:**
+- App state (session file + history/config database) → `./data`.
+- Downloaded books → `./MyBooks` by default. To point it at an existing audiobook library instead, set `BOOKS_DIR=/path/on/your/host` as a stack environment variable (Portainer: Stack → Environment variables) or in a `.env` file next to `docker-compose.yml`.
+- If your host already has something bound to ports 8000/6080, override them the same way with `WEB_PORT`/`VNC_PORT`.
 
 This is newer and less battle-tested than the CLI tools above — if something's off, check `docker compose logs -f`.
 

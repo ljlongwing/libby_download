@@ -38,7 +38,13 @@ CREATE TABLE IF NOT EXISTS config (
 """
 
 DEFAULT_CONFIG = {
-    "output_dir": "/data/books",
+    # A dedicated mount point (separate from /data, which holds the session
+    # file and this database) so it can be bind-mounted straight at wherever
+    # your audiobook library actually lives on the host -- see BOOKS_DIR in
+    # docker-compose.yml. Changing this value on the Config page only moves
+    # where *inside the container* downloads land; it does not create a new
+    # host mount, so it must point at a path that's actually mounted.
+    "output_dir": "/books",
     "scan_interval_minutes": "15",
 }
 

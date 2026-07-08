@@ -4,6 +4,7 @@
 <form method="post" action="/config">
   <label for="output_dir">Output directory (inside the container)</label>
   <input type="text" id="output_dir" name="output_dir" value="{{ config.output_dir }}">
+  <small>This is a path <em>inside the container</em>, not on your host. The default, <code>/books</code>, is bind-mounted via <code>BOOKS_DIR</code> in docker-compose.yml. If you change this to something else, add a matching volume mount too &mdash; otherwise downloads land in the container's throwaway filesystem and disappear on restart.</small>
 
   <label for="scan_interval_minutes">Scan interval (minutes)</label>
   <input type="number" min="1" id="scan_interval_minutes" name="scan_interval_minutes" value="{{ config.scan_interval_minutes }}">

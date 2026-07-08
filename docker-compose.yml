@@ -12,9 +12,13 @@ services:
       # must match whatever host port VNC_PORT above actually publishes.
       - VNC_PORT=${VNC_PORT:-6080}
     volumes:
-      # Session file (.libby_session.json), the SQLite history/config db,
-      # and (by default) the downloaded books all live under here so they
-      # survive container restarts/rebuilds. If you change the "Output
-      # directory" config to a path outside /data, add another volume for it.
+      # App state: session file (.libby_session.json) + the SQLite
+      # history/config db. Doesn't need to be user-facing, so it defaults to
+      # a folder next to this compose file.
       - ./data:/data
+      # Downloaded books. Point BOOKS_DIR at wherever your audiobook library
+      # actually lives on the host, e.g. BOOKS_DIR=/mnt/media/audiobooks as
+      # a stack environment variable in Portainer (or a .env file here).
+      # Defaults to ./MyBooks, matching the standalone CLI tool's default.
+      - ${BOOKS_DIR:-./MyBooks}:/books
     restart: unless-stopped
