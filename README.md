@@ -5,6 +5,9 @@ This repo contains two related, standalone tools that are provided for **educati
 *   **`libby_dl.py`** — downloads your borrowed audiobooks from **Libby** (libbyapp.com).
 *   **`chirp_dl.py`** — downloads your purchased audiobooks from **Chirp Books** (chirpbooks.com).
 
+### 🔒 Why isn't there a Hoopla downloader?
+Hoopla's audiobooks *and* video both stream through **Widevine/PlayReady DRM** (via castLabs DRMtoday — confirmed by inspecting the DASH manifest: `ContentProtection` / `cenc:default_KID` elements and real Widevine/PlayReady license requests to `patron-api-gateway.hoopladigital.com`). That's genuine content encryption, not just an access-token quirk like the ones these tools work around for Libby/Chirp, so building a downloader for it would mean circumventing DRM — illegal under DMCA §1201 regardless of having a valid loan. This isn't going to change, so there's no need to re-investigate it.
+
 ### ⚖️ Disclaimer
 *   **Valid Access Required:** These tools are intended only for users who have a **valid, active loan** (Libby) or have **purchased** the title (Chirp) they are accessing.
 *   **Personal Use Only:** Any files downloaded using these tools should be for your own personal, private use. Redistribution of copyrighted material is a violation of copyright law and the Terms of Service of your library, Libby, and Chirp.
