@@ -1,16 +1,15 @@
-# Libby Audiobook Downloader
+# Audiobook Downloaders (Libby + Chirp)
 
-This tool is provided for **educational purposes only**. It is designed to demonstrate how web automation and network traffic analysis can be used to interact with web applications. 
+This repo contains two related, standalone tools that are provided for **educational purposes only**. They are designed to demonstrate how web automation and network traffic analysis can be used to interact with web applications.
+
+*   **`libby_dl.py`** — downloads your borrowed audiobooks from **Libby** (libbyapp.com).
+*   **`chirp_dl.py`** — downloads your purchased audiobooks from **Chirp Books** (chirpbooks.com).
 
 ### ⚖️ Disclaimer
-*   **Active Loan Required:** This tool is intended only for users who have a **valid, active loan** for the audiobook they are accessing through [libbyapp.com](https://libbyapp.com). 
-*   **Personal Use Only:** Any files downloaded using this tool should be for your own personal, private use. Redistribution of copyrighted material is a violation of copyright law and the Terms of Service of your library and Libby.
-*   **No Affiliation:** This project is **not** affiliated with, endorsed by, or supported by Libby, OverDrive, or any library system.
-*   **User Responsibility:** By using this tool, you agree to comply with all applicable laws and the Terms of Service of the platforms you are accessing. The author assumes no liability for misuse of this tool.
-
----
-
-This tool helps you download your borrowed audiobooks from Libby (libbyapp.com) and save them to your computer as MP3 files.
+*   **Valid Access Required:** These tools are intended only for users who have a **valid, active loan** (Libby) or have **purchased** the title (Chirp) they are accessing.
+*   **Personal Use Only:** Any files downloaded using these tools should be for your own personal, private use. Redistribution of copyrighted material is a violation of copyright law and the Terms of Service of your library, Libby, and Chirp.
+*   **No Affiliation:** This project is **not** affiliated with, endorsed by, or supported by Libby, OverDrive, Chirp Books, or any library system.
+*   **User Responsibility:** By using these tools, you agree to comply with all applicable laws and the Terms of Service of the platforms you are accessing. The author assumes no liability for misuse of these tools.
 
 ---
 
@@ -19,12 +18,12 @@ This tool helps you download your borrowed audiobooks from Libby (libbyapp.com) 
 If you don't want to install Python, you can download the "standalone" version for your computer:
 
 1.  Go to the **[Releases](https://github.com/ljlongwing/libby_download/releases)** page.
-2.  Download the file for your system:
-    *   **Windows**: Download `LibbyDownloader.exe`
-    *   **Linux**: Download `LibbyDownloader`
+2.  Download the file(s) for your system:
+    *   **Windows**: `LibbyDownloader.exe` and/or `ChirpDownloader.exe`
+    *   **Linux**: `LibbyDownloader` and/or `ChirpDownloader`
 3.  Double-click the file to start!
 
-*Note: You may still need to install **FFmpeg** if you want the tool to split the book into chapters (see below).*
+*Note: You may still need to install **FFmpeg** if you want the Libby tool to split the book into chapters (see below). The Chirp tool downloads each chapter as its own file already, so FFmpeg isn't needed for it.*
 
 ---
 
@@ -38,7 +37,7 @@ This is the "engine" that runs the downloader script.
 - **Linux**: Most Linux systems already have this. If not, run `sudo apt install python3 python3-pip` (on Ubuntu/Debian).
 
 ### Browser (Required)
-The tool uses a web browser in the background to talk to Libby.
+Both tools use a web browser in the background to talk to Libby or Chirp.
 - It will automatically look for **Google Chrome**, **Microsoft Edge**, or **Brave Browser** on your computer.
 - If you don't have those, the tool will install its own "helper browser" during the setup step.
 
@@ -65,7 +64,7 @@ python -m pip install --upgrade pip
 # 2. Install the tools the script needs
 python -m pip install -r requirements.txt
 
-# 3. Install the "helper browser" that the script uses to visit Libby
+# 3. Install the "helper browser" that the scripts use to visit Libby/Chirp
 python -m playwright install chromium
 ```
 
@@ -73,52 +72,66 @@ Using `python -m` is the safest way to run these commands on both Windows and Li
 
 ---
 
-## 3. How to Use the Downloader
+## 3. How to Use the Downloaders
+
+Both tools share the same setup and follow the same basic flow; the differences are called out below.
 
 ### The Easy Way (Shortcuts)
-I have included "Start" scripts to make it easier to run the tool:
+I have included "Start" scripts to make it easier to run each tool:
 
-- **Windows**: Double-click the file named `start_windows.bat`.
-- **Linux**: Run the file named `start_linux.sh`.
+- **Libby — Windows**: Double-click `start_windows.bat`.
+- **Libby — Linux**: Run `start_linux.sh`.
+- **Chirp — Windows**: Double-click `start_chirp.bat`.
+- **Chirp — Linux**: Run `start_chirp.sh`.
 
-These scripts will automatically start the downloader and save your books into a folder named `MyBooks`. Each book gets its own subfolder inside `MyBooks` (named after the book title). They will also keep the window open at the end so you can read any messages.
+These scripts automatically start the downloader and save your books into a folder named `MyBooks`. Each book gets its own subfolder inside `MyBooks` (named after the book title), so it's safe to use the same `MyBooks` folder for both tools. They also keep the window open at the end so you can read any messages.
 
 ### The Manual Way (Terminal)
 If you prefer to run it yourself or want to use special options:
 
 ```bash
 python libby_dl.py --out "./MyBooks"
+python chirp_dl.py --out "./MyBooks"
 ```
 *(Remember to use `python3` instead of `python` if you are on Linux!)*
 
-- A browser window will pop up and take you to **libbyapp.com**.
-- Log in just like you usually do: add your library card and your PIN.
-- Once you see your "Shelf" with your borrowed books, go back to your terminal window and **press the Enter key**.
+- A browser window will pop up and take you to **libbyapp.com** or **chirpbooks.com**.
+- Log in just like you usually do (library card + PIN for Libby; your account for Chirp).
+- Once you see your shelf/library, go back to your terminal window and **press the Enter key**.
 - **Good news!** The tool will now remember your login. You won't have to do this again.
 
 ### Step 2: Picking a book
-Every time you run the script after that, it will:
-1. Show you a list of the audiobooks you currently have borrowed.
+Every time you run a script after that, it will:
+1. Show you a list of the audiobooks in your Libby shelf or Chirp library.
 2. Ask you to type a number (like `1` or `2`) to pick the book you want.
 3. Start the download process!
 
 ### Step 3: Let it work
-The script will "scan" through the book in the background. You might see messages about "Capturing parts." This is normal! It is simulating a listener to make sure every piece of the audio is found.
+- **Libby**: the script "scans" through the book in the background, "fast-forwarding" to trigger every audio request, then downloads and stitches the resulting files together with a `.cue` file for chapters.
+- **Chirp**: the script reads the chapter list straight from the book's page, then downloads each chapter individually (Chirp already delivers audiobooks as one file per chapter, so there's no splitting step). You'll see a line printed for each chapter as it downloads.
 
 ---
 
 ## 4. Troubleshooting & Tips
 
-- **Headless Mode**: If you don't want to see the browser window pop up every time, you can add `--headless` to the command:
+- **Headless Mode**: If you don't want to see the browser window pop up every time, add `--headless` to the command:
   `python libby_dl.py --out "./MyBooks" --headless`
-- **Missing Chapters**: If you find that the chapters aren't being split, make sure you have **FFmpeg** installed (see Step 1).
-- **Session File**: If you ever want the tool to "forget" your login, delete the file named `.libby_session.json` in your user folder.
+  `python chirp_dl.py --out "./MyBooks" --headless`
+- **Missing Chapters (Libby)**: If you find that the chapters aren't being split, make sure you have **FFmpeg** installed (see Step 1). This doesn't apply to Chirp — its chapters are already separate files.
+- **Session Files**: If you ever want a tool to "forget" your login, delete `.libby_session.json` or `.chirp_session.json` from your user folder.
 
 ---
 
 ## Simplified "How It Works"
 
+### Libby
 1. **Browsing**: The tool looks at your Libby shelf and shows you what you've borrowed.
 2. **Scanning**: It opens the book player and "fast-forwards" through it very quickly. This tricks the library system into sending the audio files to the browser.
 3. **Saving**: As those audio files arrive, the tool grabs them and saves them to your computer.
-4. **Organizing**: It looks at the book's data to find the narrator, the author, and the cover art, then it attaches all that info to your new MP3 files so they look great in your music player.
+4. **Organizing**: It looks at the book's data to find the narrator, the author, and the cover art, then it attaches all that info to your new MP3 files so they look great in your music player, plus writes a `.cue` file marking each chapter.
+
+### Chirp
+1. **Browsing**: The tool looks at your Chirp library and shows you what you own.
+2. **Reading the chapter list**: It opens the book's player page and reads the exact chapter list (names, lengths) directly from the page — no guessing or fast-forwarding needed.
+3. **Downloading**: For each chapter, it selects it in the player and starts playback just long enough to capture that chapter's complete audio file.
+4. **Organizing**: It tags each chapter file with the title, author, narrator, and cover art, and writes both a `.cue` file and a plain-text chapter list.
