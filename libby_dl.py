@@ -870,10 +870,25 @@ class LibbyDownloader:
                     'audiobook', 'listening', 'player', 'loading'
                 ];
 
-                const candidates = [
+                const rawCandidates = [
                     ...document.querySelectorAll('li, [role="listitem"], [class*="item"], [class*="row"]')
                 ];
-                
+
+                // The broad selector above also matches a matched row's own
+                // child elements (e.g. a "chapter-row-title" div nested
+                // inside a "chapter-row" li both contain "row"), which would
+                // otherwise count one real chapter multiple times. Keep only
+                // the outermost match in each nested cluster.
+                const candidateSet = new Set(rawCandidates);
+                const candidates = rawCandidates.filter(el => {
+                    let p = el.parentElement;
+                    while (p) {
+                        if (candidateSet.has(p)) return false;
+                        p = p.parentElement;
+                    }
+                    return true;
+                });
+
                 for (const el of candidates) {
                     const text = el.textContent.trim();
                     if (!text || text.length < 2) continue;
