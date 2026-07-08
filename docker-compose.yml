@@ -13,12 +13,20 @@ services:
       - VNC_PORT=${VNC_PORT:-6080}
     volumes:
       # App state: session file (.libby_session.json) + the SQLite
-      # history/config db. Doesn't need to be user-facing, so it defaults to
-      # a folder next to this compose file.
-      - ./data:/data
-      # Downloaded books. Point BOOKS_DIR at wherever your audiobook library
-      # actually lives on the host, e.g. BOOKS_DIR=/mnt/media/audiobooks as
-      # a stack environment variable in Portainer (or a .env file here).
-      # Defaults to ./MyBooks, matching the standalone CLI tool's default.
+      # history/config db. A *named* (Docker-managed) volume, not a relative
+      # bind mount like ./data -- Portainer's "Repository" stack build
+      # clones the repo into a stack-specific directory, so a relative path
+      # can silently resolve to a fresh, empty location on every redeploy
+      # (this is why config/history was resetting). A named volume is
+      # tracked by the Docker daemon itself, independent of where the
+      # compose file lives, and survives redeploys/rebuilds reliably.
+      - libby-data:/data
+      # Downloaded books. Set BOOKS_DIR to an ABSOLUTE path on your host
+      # (e.g. BOOKS_DIR=/mnt/media/audiobooks, as a stack environment
+      # variable in Portainer) -- a relative default here would have the
+      # exact same silent-reset problem ./data just had.
       - ${BOOKS_DIR:-./MyBooks}:/books
     restart: unless-stopped
+
+volumes:
+  libby-data:
