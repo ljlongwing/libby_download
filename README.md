@@ -24,8 +24,9 @@ docker compose up --build -d
 Then visit `http://<host>:8000`, go to **Authentication**, and log in.
 
 **Where things persist:**
-- App state (session file + history/config database) lives in a Docker-managed **named volume** (`libby-data`), not a folder next to the compose file — deliberately, since a relative bind mount can silently reset to empty on redeploy under some deploy methods (notably Portainer's "Repository" stack build, which clones the repo into a stack-specific directory each time).
-- Downloaded books default to `./MyBooks`, which has that same fragility. **Set `BOOKS_DIR` to an absolute path** on your host (e.g. `BOOKS_DIR=/mnt/media/audiobooks`, as a stack environment variable in Portainer, or in a `.env` file next to `docker-compose.yml`) rather than relying on the relative default.
+- App state (session file + history/config database) lives in a Docker-managed **named volume** (`libby-data`) by default — deliberately, not a folder next to the compose file, since a relative bind mount can silently reset to empty on redeploy under some deploy methods (notably Portainer's "Repository" stack build, which clones the repo into a stack-specific directory each time). To use a specific host folder instead (for easy backup/inspection), set `DATA_DIR` to an **absolute** path, e.g. `DATA_DIR=/srv/libby-data`.
+- Downloaded books default to `./MyBooks`, which has that same relative-path fragility. **Set `BOOKS_DIR` to an absolute path** on your host (e.g. `BOOKS_DIR=/mnt/media/audiobooks`) rather than relying on the relative default.
+- Both `DATA_DIR` and `BOOKS_DIR` are set as stack environment variables in Portainer (Stack → Environment variables), or in a `.env` file next to `docker-compose.yml` if running via the CLI.
 - If your host already has something bound to ports 8000/6080, override them the same way with `WEB_PORT`/`VNC_PORT`.
 
 This is newer and less battle-tested than the CLI tools above — if something's off, check `docker compose logs -f`.
