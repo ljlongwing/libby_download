@@ -21,4 +21,3 @@ if %ERRORLEVEL% neq 0 (
 )
 
 python chirp_dl.py --out "./MyBooks" %*
-pause

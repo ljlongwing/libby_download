@@ -1983,17 +1983,21 @@ class LibbyDownloader:
                 pass
 
         diff = expected - actual
+        # round() (not the {:.0f} format spec) so a tiny negative diff (more
+        # downloaded than expected, which is harmless) can't print as "-0s" —
+        # {:.0f} preserves the float's negative-zero sign bit, round() doesn't.
+        diff_display = round(diff)
         print(
             f"\nDuration check — Expected: {_fmt_hms(expected)}  "
             f"Downloaded: {_fmt_hms(actual)}  "
-            f"Diff: {diff:.0f}s"
+            f"Diff: {diff_display}s"
         )
 
         if diff <= THRESHOLD:
             print("Duration check passed.")
             return
 
-        print(f"Warning: {diff:.0f}s of audio unaccounted for — some parts may be missing.")
+        print(f"Warning: {diff_display}s of audio unaccounted for — some parts may be missing.")
 
     async def _download_all(self, book_name: str) -> None:
         print(f"\nDownloading {len(self.captured)} file(s) → {self.output_dir.resolve()}/")
@@ -2570,7 +2574,18 @@ def main() -> None:
         headless=args.headless,
         skip_minutes=args.skip_minutes,
     )
-    asyncio.run(dl.run())
+    try:
+        asyncio.run(dl.run())
+    except Exception:
+        import traceback
+        traceback.print_exc()
+    finally:
+        # Keep the window open (e.g. when double-clicking the standalone
+        # .exe) so warnings/errors in the output above stay visible.
+        try:
+            input("\nPress Enter to exit...")
+        except EOFError:
+            pass
 
 
 if __name__ == "__main__":

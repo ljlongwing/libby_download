@@ -646,4 +646,15 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     downloader = ChirpDownloader(args.out, ffmpeg=args.ffmpeg, headless=args.headless)
-    asyncio.run(downloader.run())
+    try:
+        asyncio.run(downloader.run())
+    except Exception:
+        import traceback
+        traceback.print_exc()
+    finally:
+        # Keep the window open (e.g. when double-clicking the standalone
+        # .exe) so warnings/errors in the output above stay visible.
+        try:
+            input("\nPress Enter to exit...")
+        except EOFError:
+            pass
