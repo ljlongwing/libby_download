@@ -30,6 +30,7 @@ Requirements
 
 import argparse
 import asyncio
+import os
 import re
 import subprocess
 import sys
@@ -121,6 +122,12 @@ class LibbyDownloader:
             ]
             browser_path = next((str(p) for p in browser_candidates if p.exists()), None)
 
+            # Auto-fallback to headless if on Linux with no DISPLAY
+            if not self.headless and sys.platform == "linux" and not os.environ.get("DISPLAY"):
+                print("Warning: No X server detected ($DISPLAY is not set).")
+                print("Falling back to headless mode. (Note: Login may be impossible if required.)")
+                self.headless = True
+
             launch_kwargs: dict = {
                 "headless": self.headless,
                 # Suppress automation indicators so sites treat this like a
@@ -175,6 +182,7 @@ class LibbyDownloader:
                 self.shelf_title = book.get("title", "")
                 self.metadata["title"] = self.shelf_title
                 self.metadata["author"] = book.get("author", "")
+                self.metadata["cover_url"] = book.get("cover_url", "")
 
                 # Register request capture on the context (not just one page) so
                 # it covers new tabs and fires from the very first request,
@@ -188,7 +196,7 @@ class LibbyDownloader:
                 if active is not page:
                     print("  Player opened in a new tab — switching to it.")
                     try:
-                        await active.wait_for_load_state("networkidle", timeout=60_000)
+                        await active.wait_for_load_state("load", timeout=60_000)
                     except Exception:
                         pass
                     await active.wait_for_timeout(2_000)
@@ -235,18 +243,27 @@ class LibbyDownloader:
     async def _ensure_authenticated(
         self, page: Page, context: BrowserContext
     ) -> None:
-        await page.goto(LIBBY_URL, wait_until="networkidle", timeout=60_000)
+        await page.goto(LIBBY_URL, wait_until="load", timeout=60_000)
         await page.wait_for_timeout(2_000)
 
         if await self._is_logged_in(page):
             print("Authenticated.")
             return
 
-        print(
-            "\nNot logged in. The browser window is open.\n"
-            "Add your library card inside Libby (card number/email + PIN).\n"
-            "Once your shelf is visible, come back here and press Enter.\n"
-        )
+        if not self.headless:
+            print(
+                "\nNot logged in. The browser window is open.\n"
+                "Add your library card inside Libby (card number/email + PIN).\n"
+                "Once your shelf is visible, come back here and press Enter.\n"
+            )
+        else:
+            print(
+                "\nNot logged in and running in headless mode.\n"
+                "Login is required, but the browser window cannot be displayed.\n"
+                "Please run on a machine with a GUI to log in and create a session,\n"
+                f"or copy a valid session file to {SESSION_FILE}\n"
+            )
+
         try:
             input(">>> Press Enter when logged in: ")
         except EOFError:
@@ -314,6 +331,7 @@ class LibbyDownloader:
                         "title": loan.get("title", ""),
                         "author": loan.get("firstCreatorName", ""),
                         "href": None,
+                        "cover_url": _cover_url_from_covers(loan.get("covers")),
                     })
                     added += 1
                 if added:
@@ -325,7 +343,7 @@ class LibbyDownloader:
         try:
             # Always navigate fresh so the shelf API call fires after the
             # listener is registered (avoids missing an already-loaded page).
-            await page.goto(LIBBY_URL + "/shelf", wait_until="networkidle", timeout=30_000)
+            await page.goto(LIBBY_URL + "/shelf", wait_until="load", timeout=30_000)
             await page.wait_for_timeout(2_000)
             try:
                 await asyncio.wait_for(api_done.wait(), timeout=8)
@@ -365,6 +383,7 @@ class LibbyDownloader:
                                     title: loan.title || '',
                                     author: loan.firstCreatorName || '',
                                     href: null,
+                                    covers: loan.covers || null,
                                 });
                             }
                         } catch (_) {}
@@ -373,6 +392,8 @@ class LibbyDownloader:
                 }
             """)
             if ls_books:
+                for b in ls_books:
+                    b["cover_url"] = _cover_url_from_covers(b.pop("covers", None))
                 return sorted(ls_books, key=lambda b: b.get("title", "").lower())
         except Exception:
             pass
@@ -403,11 +424,13 @@ class LibbyDownloader:
                         const linkEl = card.querySelector(
                             'a[href*="open"], a[href*="audiobook"]'
                         );
+                        const imgEl = card.querySelector('img');
                         results.push({
                             id,
                             title: titleEl ? titleEl.textContent.trim() : id,
                             author: authorEl ? authorEl.textContent.trim() : '',
                             href: linkEl ? linkEl.getAttribute('href') : null,
+                            cover_url: imgEl ? (imgEl.currentSrc || imgEl.src || '') : '',
                         });
                     });
                     return results;
@@ -449,7 +472,7 @@ class LibbyDownloader:
         href = book.get("href")
         if href:
             url = href if href.startswith("http") else LIBBY_URL + href
-            await page.goto(url, wait_until="networkidle", timeout=60_000)
+            await page.goto(url, wait_until="load", timeout=60_000)
             await page.wait_for_timeout(3_000)
             if "/open/" in page.url:
                 print(f"  Player URL: {page.url}")
@@ -461,7 +484,7 @@ class LibbyDownloader:
         if card_id and loan_id:
             direct_url = f"{LIBBY_URL}/open/loan/{card_id}/{loan_id}"
             print(f"  Trying direct URL: {direct_url}")
-            await page.goto(direct_url, wait_until="networkidle", timeout=60_000)
+            await page.goto(direct_url, wait_until="load", timeout=60_000)
             await page.wait_for_timeout(3_000)
             if "/open/" in page.url:
                 print(f"  Player URL: {page.url}")
@@ -469,7 +492,7 @@ class LibbyDownloader:
 
         # Navigate to the shelf and try to click the Open Audiobook button.
         if "/shelf" not in page.url:
-            await page.goto(LIBBY_URL + "/shelf", wait_until="networkidle", timeout=30_000)
+            await page.goto(LIBBY_URL + "/shelf", wait_until="load", timeout=30_000)
             await page.wait_for_timeout(2_000)
 
         # Try text-based button matching (handles React onClick buttons with no href).
@@ -509,7 +532,7 @@ class LibbyDownloader:
                 if chosen:
                     print(f"  Clicking '{label}' button...")
                     await chosen.click(timeout=15_000)
-                    await page.wait_for_load_state("networkidle", timeout=60_000)
+                    await page.wait_for_load_state("load", timeout=60_000)
                     await page.wait_for_timeout(3_000)
                     opened = True
                     break
@@ -641,12 +664,14 @@ class LibbyDownloader:
         elif isinstance(desc, str):
             self.metadata["description"] = desc
 
-        # Cover art URL
-        cover = data.get("cover150Wide", {})
-        if isinstance(cover, dict):
-            self.metadata["cover_url"] = cover.get("href", "")
-        elif isinstance(cover, str):
-            self.metadata["cover_url"] = cover
+        # Cover art URL. BIFOCAL nests these under a "covers" dict keyed by
+        # size (e.g. covers.cover150Wide.href); older/alternate manifests have
+        # been seen with the size key directly at the top level.
+        cover_url = _cover_url_from_covers(data.get("covers", {})) or _cover_url_from_covers(data)
+        if cover_url:
+            self.metadata["cover_url"] = cover_url
+        elif not self.metadata.get("cover_url"):
+            print("  Warning: could not find a cover art URL in BIFOCAL data.")
 
         # Reading order – list of {href, duration} for each audio part.
         self.reading_order = data.get("readingOrder", [])
@@ -2309,6 +2334,28 @@ def _seq_frontier(captured: list) -> int:
     while (n + 1) in nums:
         n += 1
     return n
+
+
+_COVER_SIZE_KEYS = ("cover510Wide", "cover300Wide", "cover150Wide", "cover")
+
+
+def _cover_url_from_covers(covers) -> str:
+    """Pull a cover image URL out of a Libby/OverDrive "covers" dict, which is
+    keyed by size (e.g. {"cover150Wide": {"href": "..."}}). Prefers larger
+    sizes; falls back to whatever entry is present.
+    """
+    if not isinstance(covers, dict) or not covers:
+        return ""
+    for key in _COVER_SIZE_KEYS:
+        entry = covers.get(key)
+        if isinstance(entry, dict) and entry.get("href"):
+            return entry["href"]
+        if isinstance(entry, str) and entry:
+            return entry
+    for entry in covers.values():
+        if isinstance(entry, dict) and entry.get("href"):
+            return entry["href"]
+    return ""
 
 
 def _safe(s: str) -> str:
