@@ -1,7 +1,10 @@
-"""Background scan/download loop for the Libby auto-download service.
+"""Background scan/download loop for the multi-source auto-download
+service.
 
-Reuses LibbyDownloader from the repo-root libby_dl.py rather than
-reimplementing shelf/player/download logic.
+Drives whichever downloader sources.SOURCES[source] points at generically
+-- both LibbyDownloader and ChirpDownloader share the same
+_launch_browser_context/_get_shelf/_download_selected_book shape, so there
+is no per-source branching in the scan logic itself.
 """
 
 import asyncio
@@ -13,23 +16,23 @@ from pathlib import Path
 from playwright.async_api import async_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import libby_dl  # noqa: E402
 
 import db  # noqa: E402
+from sources import SOURCES  # noqa: E402
 
 logger = logging.getLogger("libby_service.worker")
 
-_scan_running = False
-last_scan_result: dict = {}
-last_scan_at: str = ""
+_scan_running: dict[str, bool] = {s: False for s in SOURCES}
+last_scan_result: dict[str, dict] = {s: {} for s in SOURCES}
+last_scan_at: dict[str, str] = {s: "" for s in SOURCES}
 
-# libby_dl already prints detailed, line-by-line progress (each part
+# Each downloader already prints detailed, line-by-line progress (each part
 # captured, download progress, duration checks, etc.) -- rather than
 # re-instrumenting it, tee stdout into this buffer during a scan so the web
 # UI can show the same detail live instead of just "a scan is running".
 # Cleared at the start of each scan; holds the last scan's full output
-# (capped) in between.
-scan_log: list[str] = []
+# (capped) in between. One buffer per source.
+scan_log: dict[str, list[str]] = {s: [] for s in SOURCES}
 _SCAN_LOG_MAXLEN = 1000
 
 
@@ -58,116 +61,121 @@ class _TeeWriter:
         self._real.flush()
 
 
-async def scan_once() -> dict:
-    """Run one shelf scan: download any loan not already marked complete.
+async def scan_once(source: str) -> dict:
+    """Run one shelf/library scan for the given source: download any loan
+    not already marked complete.
 
-    Safe to call while a scan is already running (e.g. "Scan Now" clicked
-    during a scheduled scan) — it just reports back without starting a
-    second, overlapping scan. Single-threaded asyncio means the
-    check-then-set below is race-free without a lock.
+    Safe to call while a scan for this source is already running (e.g.
+    "Scan Now" clicked during a scheduled scan) — it just reports back
+    without starting a second, overlapping scan for that source. A scan for
+    the *other* source may run concurrently; each source has independent
+    state. Single-threaded asyncio means the check-then-set below is
+    race-free without a lock.
     """
-    global _scan_running, last_scan_result, last_scan_at
+    cfg = SOURCES[source]
 
-    if _scan_running:
+    if _scan_running[source]:
         return {"skipped": True, "reason": "scan already in progress"}
 
-    if not libby_dl.SESSION_FILE.exists():
+    if not cfg["session_file"].exists():
         result = {"skipped": True, "reason": "not authenticated"}
-        last_scan_result = result
+        last_scan_result[source] = result
         return result
 
-    _scan_running = True
-    scan_log.clear()
+    _scan_running[source] = True
+    log = scan_log[source]
+    log.clear()
     old_stdout = sys.stdout
-    sys.stdout = _TeeWriter(old_stdout, scan_log, _SCAN_LOG_MAXLEN)
+    sys.stdout = _TeeWriter(old_stdout, log, _SCAN_LOG_MAXLEN)
     downloaded = failed = skipped = 0
     try:
         output_dir = db.get_config("output_dir")
-        # headless=True was tried first but Libby's player doesn't fully
-        # initialize under real headless Chromium (found ~1 chapter instead
-        # of the full TOC, no play/TOC buttons, zero parts captured -- see
-        # commit history). Confirmed via local repro that the exact same
-        # bundled Chromium works correctly non-headless. The container
-        # already runs Xvfb (for the auth flow), so rendering into that
-        # virtual display gets the same real-browser behavior without
-        # needing anyone to actually be watching.
-        downloader = libby_dl.LibbyDownloader(output_dir=output_dir, headless=False)
+        # headless=True was tried first for Libby but its player doesn't
+        # fully initialize under real headless Chromium (found ~1 chapter
+        # instead of the full TOC, no play/TOC buttons, zero parts
+        # captured). Confirmed via local repro that the exact same bundled
+        # Chromium works correctly non-headless. Chirp hasn't been proven
+        # safe headless either, so both sources use the same non-headless
+        # approach, rendering into the container's existing Xvfb display
+        # (already needed for the auth flow) without needing anyone to
+        # actually be watching.
+        downloader = cfg["downloader_cls"](output_dir=output_dir, headless=False)
 
         async with async_playwright() as pw:
             browser, context, page, player_page = await downloader._launch_browser_context(pw)
             try:
                 books = await downloader._get_shelf(page)
-                db.sync_shelf([
+                db.sync_shelf(source, [
                     {
-                        "loan_id": b.get("id", ""),
+                        "loan_id": cfg["get_loan_id"](b),
                         "title": b.get("title", ""),
                         "author": b.get("author", ""),
-                        "card_id": b.get("card_id", ""),
+                        "card_id": cfg["get_card_id"](b),
                     }
                     for b in books
                 ])
                 for book in books:
-                    loan_id = book.get("id", "")
+                    loan_id = cfg["get_loan_id"](book)
                     if not loan_id:
                         continue
-                    if db.is_downloaded(loan_id):
+                    if db.is_downloaded(source, loan_id):
                         skipped += 1
                         continue
 
                     title = book.get("title", "")
                     author = book.get("author", "")
-                    card_id = book.get("card_id", "")
-                    db.upsert_book(loan_id, title, author, status="downloading", card_id=card_id)
+                    card_id = cfg["get_card_id"](book)
+                    db.upsert_book(source, loan_id, title, author, status="downloading", card_id=card_id)
 
                     try:
                         await downloader._download_selected_book(page, context, player_page, book)
                         db.upsert_book(
-                            loan_id, title, author, status="complete", card_id=card_id,
+                            source, loan_id, title, author, status="complete", card_id=card_id,
                             output_path=str(downloader.output_dir), mark_downloaded=True,
                         )
                         downloaded += 1
                     except Exception as e:
-                        logger.exception("Download failed for %r", title)
+                        logger.exception("[%s] Download failed for %r", source, title)
                         db.upsert_book(
-                            loan_id, title, author, status="failed", card_id=card_id, error=str(e),
+                            source, loan_id, title, author, status="failed", card_id=card_id, error=str(e),
                         )
                         failed += 1
             finally:
                 try:
-                    await context.storage_state(path=str(libby_dl.SESSION_FILE), indexed_db=True)
+                    await context.storage_state(path=str(cfg["session_file"]), indexed_db=True)
                 except Exception:
                     try:
-                        await context.storage_state(path=str(libby_dl.SESSION_FILE))
+                        await context.storage_state(path=str(cfg["session_file"]))
                     except Exception:
                         pass
                 await browser.close()
 
         result = {"downloaded": downloaded, "failed": failed, "skipped": skipped}
     except Exception as e:
-        logger.exception("Scan failed")
+        logger.exception("[%s] Scan failed", source)
         result = {"error": str(e)}
     finally:
         sys.stdout = old_stdout
-        _scan_running = False
+        _scan_running[source] = False
 
-    last_scan_result = result
-    last_scan_at = datetime.now(timezone.utc).isoformat()
+    last_scan_result[source] = result
+    last_scan_at[source] = datetime.now(timezone.utc).isoformat()
     return result
 
 
-async def loop_forever() -> None:
-    """Scan, sleep for the configured interval, repeat forever. Re-reads the
-    interval from the DB each cycle so a config change takes effect on the
-    next cycle without restarting the service."""
+async def loop_forever(source: str) -> None:
+    """Scan, sleep for the configured interval, repeat forever, for one
+    source. Re-reads the interval from the DB each cycle so a config change
+    takes effect on the next cycle without restarting the service."""
     while True:
         try:
-            result = await scan_once()
-            logger.info("Scan result: %s", result)
+            result = await scan_once(source)
+            logger.info("[%s] Scan result: %s", source, result)
         except Exception:
-            logger.exception("Unexpected error in scan loop")
+            logger.exception("[%s] Unexpected error in scan loop", source)
 
         try:
-            interval_minutes = float(db.get_config("scan_interval_minutes") or 15)
+            interval_minutes = float(db.get_config(f"{source}_scan_interval_minutes") or 15)
         except ValueError:
             interval_minutes = 15
         await asyncio.sleep(max(60.0, interval_minutes * 60))
