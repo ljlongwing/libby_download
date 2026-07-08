@@ -2,8 +2,15 @@ services:
   libby-service:
     build: .
     ports:
-      - "8000:8000"   # web UI (dashboard / auth / history / config)
-      - "6080:6080"   # noVNC, embedded as an iframe by the auth page
+      # Host-side ports are overridable (e.g. if 8000/6080 are already taken
+      # on this Docker host) -- set WEB_PORT/VNC_PORT as stack environment
+      # variables in Portainer, or in a .env file next to this compose file.
+      - "${WEB_PORT:-8000}:8000"   # web UI (dashboard / auth / history / config)
+      - "${VNC_PORT:-6080}:6080"   # noVNC, embedded as an iframe by the auth page
+    environment:
+      # The auth page's iframe is built browser-side from this value, so it
+      # must match whatever host port VNC_PORT above actually publishes.
+      - VNC_PORT=${VNC_PORT:-6080}
     volumes:
       # Session file (.libby_session.json), the SQLite history/config db,
       # and (by default) the downloaded books all live under here so they
