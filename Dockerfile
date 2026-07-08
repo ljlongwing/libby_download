@@ -30,7 +30,8 @@ RUN chmod +x ./service/entrypoint.sh
 ENV DISPLAY=:99 \
     HOME=/data \
     LIBBY_SERVICE_DB=/data/db/service.db \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PYTHONIOENCODING=utf-8
 
 EXPOSE 8000 6080
 

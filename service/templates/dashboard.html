@@ -12,19 +12,65 @@
 </p>
 
 <p id="scanStatus">
-  {% if scan_running %}A scan is currently running&hellip;
-  {% elif last_scan %}Last scan result: {{ last_scan }}
-  {% else %}No scan has run yet.{% endif %}
+  {% if scan_running %}
+    A scan is currently running&hellip;
+  {% elif last_scan %}
+    Last scan{% if last_scan_at %} ({{ last_scan_at[:16].replace('T', ' ') }} UTC){% endif %}:
+    {% if last_scan.error %}
+      failed &mdash; {{ last_scan.error }}
+    {% elif last_scan.skipped %}
+      skipped &mdash; {{ last_scan.reason }}
+    {% else %}
+      {{ last_scan.downloaded }} downloaded, {{ last_scan.failed }} failed, {{ last_scan.skipped }} already had
+    {% endif %}
+  {% else %}
+    No scan has run yet.
+  {% endif %}
 </p>
 
-<form method="post" action="/scan" onsubmit="setTimeout(pollLog, 500)">
+<form method="post" action="/scan">
   <button type="submit" {% if not authenticated %}disabled{% endif %}>Scan Now</button>
 </form>
 
 <pre id="scanLog" style="max-height: 400px; overflow-y: auto; background: #111; color: #ddd; padding: 1rem; margin-top: 1rem; font-size: 0.85rem;">{{ scan_log }}</pre>
 
+<h2 style="margin-top: 2rem;">Current Shelf</h2>
+{% if shelf %}
+<table>
+  <thead>
+    <tr><th>Title</th><th>Author</th><th>Status</th><th>Downloaded</th><th></th></tr>
+  </thead>
+  <tbody>
+    {% for b in shelf %}
+    <tr>
+      <td>{{ b.title }}</td>
+      <td>{{ b.author }}</td>
+      <td class="status-{{ b.status }}">{{ b.status }}{% if b.error %} ({{ b.error }}){% endif %}</td>
+      <td>{{ b.downloaded_at[:16].replace('T', ' ') if b.downloaded_at else '—' }}</td>
+      <td>
+        {% if b.status in ('complete', 'failed') %}
+        <form method="post" action="/rebook/{{ b.loan_id }}" style="margin:0;">
+          <button type="submit" {% if scan_running %}disabled{% endif %}>Re-download</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p>Nothing on the shelf as of the last scan{% if not last_scan %} (no scan has run yet){% endif %}.</p>
+{% endif %}
+
 <script>
 let polling = false;
+
+function formatResult(r) {
+  if (!r || Object.keys(r).length === 0) return 'No scan has run yet.';
+  if (r.error) return `Last scan failed — ${r.error}`;
+  if (r.skipped) return `Last scan skipped — ${r.reason}`;
+  return `Last scan: ${r.downloaded} downloaded, ${r.failed} failed, ${r.skipped} already had`;
+}
 
 async function pollLog() {
   const resp = await fetch('/scan/log');
@@ -37,13 +83,14 @@ async function pollLog() {
     logEl.scrollTop = logEl.scrollHeight;
   }
 
-  const statusEl = document.getElementById('scanStatus');
   if (data.running) {
-    statusEl.textContent = 'A scan is currently running…';
+    document.getElementById('scanStatus').textContent = 'A scan is currently running…';
     setTimeout(pollLog, 2000);
-  } else {
-    statusEl.textContent = data.last_result ? `Last scan result: ${JSON.stringify(data.last_result)}` : 'No scan has run yet.';
-    polling = false;
+  } else if (polling) {
+    // A scan that was running just finished -- reload to pick up the
+    // updated shelf/history/status rather than reimplementing that
+    // rendering in JS.
+    location.reload();
   }
 }
 

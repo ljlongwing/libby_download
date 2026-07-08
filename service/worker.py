@@ -7,6 +7,7 @@ reimplementing shelf/player/download logic.
 import asyncio
 import logging
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from playwright.async_api import async_playwright
@@ -20,6 +21,7 @@ logger = logging.getLogger("libby_service.worker")
 
 _scan_running = False
 last_scan_result: dict = {}
+last_scan_at: str = ""
 
 # libby_dl already prints detailed, line-by-line progress (each part
 # captured, download progress, duration checks, etc.) -- rather than
@@ -64,7 +66,7 @@ async def scan_once() -> dict:
     second, overlapping scan. Single-threaded asyncio means the
     check-then-set below is race-free without a lock.
     """
-    global _scan_running, last_scan_result
+    global _scan_running, last_scan_result, last_scan_at
 
     if _scan_running:
         return {"skipped": True, "reason": "scan already in progress"}
@@ -95,6 +97,15 @@ async def scan_once() -> dict:
             browser, context, page, player_page = await downloader._launch_browser_context(pw)
             try:
                 books = await downloader._get_shelf(page)
+                db.sync_shelf([
+                    {
+                        "loan_id": b.get("id", ""),
+                        "title": b.get("title", ""),
+                        "author": b.get("author", ""),
+                        "card_id": b.get("card_id", ""),
+                    }
+                    for b in books
+                ])
                 for book in books:
                     loan_id = book.get("id", "")
                     if not loan_id:
@@ -140,6 +151,7 @@ async def scan_once() -> dict:
         _scan_running = False
 
     last_scan_result = result
+    last_scan_at = datetime.now(timezone.utc).isoformat()
     return result
 
 

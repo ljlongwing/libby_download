@@ -49,14 +49,23 @@ async def dashboard(request: Request):
         {
             "authenticated": libby_dl.SESSION_FILE.exists(),
             "last_scan": worker.last_scan_result,
+            "last_scan_at": worker.last_scan_at,
             "scan_running": worker._scan_running,
             "scan_log": "\n".join(worker.scan_log),
+            "shelf": db.list_shelf(),
         },
     )
 
 
 @app.post("/scan")
 async def scan_now():
+    asyncio.create_task(worker.scan_once())
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/rebook/{loan_id}")
+async def rebook(loan_id: str):
+    db.mark_for_redownload(loan_id)
     asyncio.create_task(worker.scan_once())
     return RedirectResponse("/", status_code=303)
 
