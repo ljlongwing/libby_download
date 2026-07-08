@@ -59,9 +59,13 @@ class ChirpDownloader:
         headless: bool = False,
     ) -> None:
         # self.output_dir starts as the base directory and is narrowed to
-        # base/<Book Name>/ once the book's title is known (see run()).
+        # base/<Book Name>/ once the book's title is known (see
+        # _download_selected_book()). self._base_output_dir is kept so a
+        # single instance can safely download more than one book in a row
+        # (see _reset_for_next_book()).
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self._base_output_dir = self.output_dir
         self.ffmpeg = ffmpeg
         self.headless = headless
 
@@ -86,42 +90,7 @@ class ChirpDownloader:
         print("=" * 60 + "\n")
 
         async with async_playwright() as pw:
-            # Find a system browser (prefer Brave or Chrome)
-            browser_path = self._find_browser()
-            
-            # Auto-fallback to headless if on Linux with no DISPLAY
-            if not self.headless and sys.platform == "linux" and not os.environ.get("DISPLAY"):
-                print("Warning: No X server detected ($DISPLAY is not set).")
-                print("Falling back to headless mode. (Note: Login may be impossible if required.)")
-                self.headless = True
-
-            launch_kwargs: dict = {
-                "headless": self.headless,
-                "args": [
-                    "--disable-blink-features=AutomationControlled",
-                    "--autoplay-policy=no-user-gesture-required",
-                    "--no-sandbox",
-                ],
-            }
-            if browser_path:
-                print(f"Using browser: {browser_path}")
-                launch_kwargs["executable_path"] = browser_path
-            else:
-                print("Warning: no system browser found — falling back to Playwright's bundled Chromium")
-            
-            browser = await pw.chromium.launch(**launch_kwargs)
-
-            ctx_kwargs: dict = {}
-            if SESSION_FILE.exists():
-                print(f"Loading saved session from {SESSION_FILE}")
-                ctx_kwargs["storage_state"] = str(SESSION_FILE)
-
-            context = await browser.new_context(**ctx_kwargs)
-            # Hide the navigator.webdriver flag
-            await context.add_init_script(
-                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-            )
-            page = await context.new_page()
+            browser, context, page = await self._launch_browser_context(pw)
 
             try:
                 await self._ensure_authenticated(page, context)
@@ -135,38 +104,11 @@ class ChirpDownloader:
                 if not book:
                     return
 
-                # Baseline from the shelf card; _extract_metadata may
-                # overwrite title/author/cover with better player-page data.
-                self.metadata["title"] = book.get("title", "")
-                self.metadata["author"] = book.get("author", "")
-                self.metadata["cover_url"] = book.get("cover_url", "")
-
-                # Intercept each chapter's audio request as it fires.
-                await context.route("**/audio_proxy/web_player/**", self._route_handler)
-
-                await self._open_player(page, book)
-                await self._extract_metadata(page)
-
-                if not self.toc:
-                    print("\nNo chapters found in the player. Cannot continue.")
+                try:
+                    await self._download_selected_book(page, context, book)
+                except RuntimeError as e:
+                    print(f"\n{e}")
                     return
-
-                book_name = _safe(self.metadata.get("title") or book["title"])
-
-                # Nest this book's files under their own subfolder so
-                # multiple downloads into the same --out don't pile up flat.
-                self.output_dir = self.output_dir / book_name
-                self.output_dir.mkdir(parents=True, exist_ok=True)
-
-                downloaded = await self._download_chapters(page, book_name)
-
-                if downloaded == 0:
-                    print("\nNo audio files were downloaded.")
-                    return
-
-                print(f"\nDownloaded {downloaded}/{len(self.toc)} chapter(s).")
-                self._write_cue(book_name)
-                self._write_chapter_info(book_name)
 
             finally:
                 try:
@@ -177,6 +119,108 @@ class ChirpDownloader:
                     except Exception:
                         pass
                 await browser.close()
+
+    async def _launch_browser_context(self, pw):
+        """Launch a browser + context, loading a saved session if present.
+
+        Returns (browser, context, page). Unlike Libby's player, Chirp's
+        never opens a new tab, so no page-tracking holder is needed here.
+
+        Shared by the interactive run() and the batch/service worker, which
+        want the exact same browser-discovery/session/anti-bot setup without
+        duplicating it.
+        """
+        # Find a system browser (prefer Brave or Chrome)
+        browser_path = self._find_browser()
+
+        # Auto-fallback to headless if on Linux with no DISPLAY
+        if not self.headless and sys.platform == "linux" and not os.environ.get("DISPLAY"):
+            print("Warning: No X server detected ($DISPLAY is not set).")
+            print("Falling back to headless mode. (Note: Login may be impossible if required.)")
+            self.headless = True
+
+        launch_kwargs: dict = {
+            "headless": self.headless,
+            "args": [
+                "--disable-blink-features=AutomationControlled",
+                "--autoplay-policy=no-user-gesture-required",
+                "--no-sandbox",
+            ],
+        }
+        if browser_path:
+            print(f"Using browser: {browser_path}")
+            launch_kwargs["executable_path"] = browser_path
+        else:
+            print("No system browser found — using Playwright's bundled Chromium.")
+
+        browser = await pw.chromium.launch(**launch_kwargs)
+
+        ctx_kwargs: dict = {}
+        if SESSION_FILE.exists():
+            print(f"Loading saved session from {SESSION_FILE}")
+            ctx_kwargs["storage_state"] = str(SESSION_FILE)
+
+        context = await browser.new_context(**ctx_kwargs)
+        # Hide the navigator.webdriver flag
+        await context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
+        page = await context.new_page()
+
+        # Intercept each chapter's audio request as it fires. Registered
+        # once here (not per-book) so a batch caller downloading several
+        # books doesn't stack duplicate route handlers.
+        await context.route("**/audio_proxy/web_player/**", self._route_handler)
+
+        return browser, context, page
+
+    def _reset_for_next_book(self) -> None:
+        """Clear per-book instance state so one ChirpDownloader instance can
+        safely download multiple books in a row (used by the batch/service
+        worker; the interactive CLI only ever downloads one book per run, so
+        this is a no-op difference for it beyond state already being fresh).
+        """
+        self.output_dir = self._base_output_dir
+        self.metadata = {}
+        self.toc = []
+        self._chapter_bytes = {}
+        self._chapter_events = {}
+
+    async def _download_selected_book(self, page, context, book: dict) -> None:
+        """Download one book (a shelf entry dict from _get_shelf) using an
+        already-open page/context. Raises RuntimeError if no chapters could
+        be found or downloaded, so batch callers can log the failure and
+        move on to the next book instead of aborting the whole scan.
+        """
+        self._reset_for_next_book()
+
+        # Baseline from the shelf card; _extract_metadata may overwrite
+        # title/author/cover with better player-page data.
+        self.metadata["title"] = book.get("title", "")
+        self.metadata["author"] = book.get("author", "")
+        self.metadata["cover_url"] = book.get("cover_url", "")
+
+        await self._open_player(page, book)
+        await self._extract_metadata(page)
+
+        if not self.toc:
+            raise RuntimeError("No chapters found in the player. Cannot continue.")
+
+        book_name = _safe(self.metadata.get("title") or book["title"])
+
+        # Nest this book's files under their own subfolder so multiple
+        # downloads into the same --out don't pile up flat.
+        self.output_dir = self._base_output_dir / book_name
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        downloaded = await self._download_chapters(page, book_name)
+
+        if downloaded == 0:
+            raise RuntimeError("No audio files were downloaded.")
+
+        print(f"\nDownloaded {downloaded}/{len(self.toc)} chapter(s).")
+        self._write_cue(book_name)
+        self._write_chapter_info(book_name)
 
     def _find_browser(self) -> Optional[str]:
         candidates = [
@@ -252,6 +296,36 @@ class ChirpDownloader:
             return False
         except Exception:
             return False
+
+    async def _wait_for_login(self, page: Page, context: BrowserContext, timeout_s: float = 600) -> bool:
+        """Non-blocking variant of _ensure_authenticated's manual-login wait,
+        for callers (the web service's auth flow) that can't use input() —
+        there's no terminal to type into. Polls _is_logged_in() and requires
+        it to hold for a few consecutive checks before accepting, so a
+        mid-redirect false positive during the login flow doesn't save a
+        bogus session.
+
+        Saves the session and returns True once confirmed; returns False if
+        timeout_s elapses first (session is not saved in that case).
+        """
+        consecutive_ok = 0
+        elapsed = 0.0
+        interval = 3.0
+        while elapsed < timeout_s:
+            await page.wait_for_timeout(int(interval * 1000))
+            elapsed += interval
+            if await self._is_logged_in(page):
+                consecutive_ok += 1
+            else:
+                consecutive_ok = 0
+            if consecutive_ok >= 3:
+                try:
+                    await context.storage_state(path=str(SESSION_FILE), indexed_db=True)
+                except Exception:
+                    await context.storage_state(path=str(SESSION_FILE))
+                print(f"Session saved to {SESSION_FILE}\n")
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # Library
