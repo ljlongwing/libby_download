@@ -11,15 +11,47 @@
   {% endif %}
 </p>
 
-{% if scan_running %}
-<p>A scan is currently running&hellip;</p>
-{% elif last_scan %}
-<p>Last scan result: {{ last_scan }}</p>
-{% else %}
-<p>No scan has run yet.</p>
-{% endif %}
+<p id="scanStatus">
+  {% if scan_running %}A scan is currently running&hellip;
+  {% elif last_scan %}Last scan result: {{ last_scan }}
+  {% else %}No scan has run yet.{% endif %}
+</p>
 
-<form method="post" action="/scan">
+<form method="post" action="/scan" onsubmit="setTimeout(pollLog, 500)">
   <button type="submit" {% if not authenticated %}disabled{% endif %}>Scan Now</button>
 </form>
+
+<pre id="scanLog" style="max-height: 400px; overflow-y: auto; background: #111; color: #ddd; padding: 1rem; margin-top: 1rem; font-size: 0.85rem;">{{ scan_log }}</pre>
+
+<script>
+let polling = false;
+
+async function pollLog() {
+  const resp = await fetch('/scan/log');
+  const data = await resp.json();
+
+  const logEl = document.getElementById('scanLog');
+  const wasScrolledToBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 10;
+  logEl.textContent = data.log;
+  if (wasScrolledToBottom) {
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  const statusEl = document.getElementById('scanStatus');
+  if (data.running) {
+    statusEl.textContent = 'A scan is currently running…';
+    setTimeout(pollLog, 2000);
+  } else {
+    statusEl.textContent = data.last_result ? `Last scan result: ${JSON.stringify(data.last_result)}` : 'No scan has run yet.';
+    polling = false;
+  }
+}
+
+// Keep polling if a scan is already running when the page loads (e.g. the
+// scheduled scan kicked off, or you reloaded mid-scan).
+if ({{ 'true' if scan_running else 'false' }}) {
+  polling = true;
+  pollLog();
+}
+</script>
 {% endblock %}

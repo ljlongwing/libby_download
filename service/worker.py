@@ -21,6 +21,40 @@ logger = logging.getLogger("libby_service.worker")
 _scan_running = False
 last_scan_result: dict = {}
 
+# libby_dl already prints detailed, line-by-line progress (each part
+# captured, download progress, duration checks, etc.) -- rather than
+# re-instrumenting it, tee stdout into this buffer during a scan so the web
+# UI can show the same detail live instead of just "a scan is running".
+# Cleared at the start of each scan; holds the last scan's full output
+# (capped) in between.
+scan_log: list[str] = []
+_SCAN_LOG_MAXLEN = 1000
+
+
+class _TeeWriter:
+    """Writes through to the real stream (container logs stay intact) while
+    also appending completed lines to a shared buffer."""
+
+    def __init__(self, real_stream, buffer: list, maxlen: int):
+        self._real = real_stream
+        self._buffer = buffer
+        self._maxlen = maxlen
+        self._partial = ""
+
+    def write(self, s: str) -> int:
+        self._real.write(s)
+        self._partial += s
+        while "\n" in self._partial:
+            line, self._partial = self._partial.split("\n", 1)
+            if line.strip():
+                self._buffer.append(line)
+        if len(self._buffer) > self._maxlen:
+            del self._buffer[: len(self._buffer) - self._maxlen]
+        return len(s)
+
+    def flush(self) -> None:
+        self._real.flush()
+
 
 async def scan_once() -> dict:
     """Run one shelf scan: download any loan not already marked complete.
@@ -41,6 +75,9 @@ async def scan_once() -> dict:
         return result
 
     _scan_running = True
+    scan_log.clear()
+    old_stdout = sys.stdout
+    sys.stdout = _TeeWriter(old_stdout, scan_log, _SCAN_LOG_MAXLEN)
     downloaded = failed = skipped = 0
     try:
         output_dir = db.get_config("output_dir")
@@ -99,6 +136,7 @@ async def scan_once() -> dict:
         logger.exception("Scan failed")
         result = {"error": str(e)}
     finally:
+        sys.stdout = old_stdout
         _scan_running = False
 
     last_scan_result = result

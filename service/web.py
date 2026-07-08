@@ -50,6 +50,7 @@ async def dashboard(request: Request):
             "authenticated": libby_dl.SESSION_FILE.exists(),
             "last_scan": worker.last_scan_result,
             "scan_running": worker._scan_running,
+            "scan_log": "\n".join(worker.scan_log),
         },
     )
 
@@ -58,6 +59,15 @@ async def dashboard(request: Request):
 async def scan_now():
     asyncio.create_task(worker.scan_once())
     return RedirectResponse("/", status_code=303)
+
+
+@app.get("/scan/log")
+async def scan_log():
+    return {
+        "running": worker._scan_running,
+        "last_result": worker.last_scan_result,
+        "log": "\n".join(worker.scan_log),
+    }
 
 
 @app.get("/auth", response_class=HTMLResponse)
