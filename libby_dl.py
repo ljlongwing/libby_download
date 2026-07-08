@@ -60,6 +60,8 @@ class LibbyDownloader:
         headless: bool = False,
         skip_minutes: float = 5.0,
     ) -> None:
+        # self.output_dir starts as the base directory and is narrowed to
+        # base/<Book Name>/ once the book's title is known (see run()).
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.ffmpeg = ffmpeg
@@ -218,6 +220,11 @@ class LibbyDownloader:
                     book_name = _safe(self.shelf_title)
                 else:
                     book_name = _safe(m_title)
+
+                # Nest this book's files under their own subfolder so
+                # multiple downloads into the same --out don't pile up flat.
+                self.output_dir = self.output_dir / book_name
+                self.output_dir.mkdir(parents=True, exist_ok=True)
 
                 await self._download_all(book_name)
                 await self._verify_duration_and_refetch(active, book_name)

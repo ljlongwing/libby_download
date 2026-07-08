@@ -81,7 +81,7 @@ I have included "Start" scripts to make it easier to run the tool:
 - **Windows**: Double-click the file named `start_windows.bat`.
 - **Linux**: Run the file named `start_linux.sh`.
 
-These scripts will automatically start the downloader and save your books into a folder named `MyBooks`. They will also keep the window open at the end so you can read any messages.
+These scripts will automatically start the downloader and save your books into a folder named `MyBooks`. Each book gets its own subfolder inside `MyBooks` (named after the book title). They will also keep the window open at the end so you can read any messages.
 
 ### The Manual Way (Terminal)
 If you prefer to run it yourself or want to use special options:
