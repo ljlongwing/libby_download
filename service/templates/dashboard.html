@@ -2,81 +2,80 @@
 {% block content %}
 <h1>Dashboard</h1>
 
-<p>
-  Status:
-  {% if authenticated %}
-    <strong style="color:#1a7f37">Authenticated</strong>
-  {% else %}
-    <strong style="color:#c00">Not authenticated</strong> &mdash; <a href="/auth">log in</a>
-  {% endif %}
-</p>
+{% for src in sources %}
+<section style="margin-bottom: 3rem; padding-bottom: 1rem; border-bottom: 1px solid #ddd;">
+  <h2>{{ src.label }}</h2>
 
-<p id="scanStatus">
-  {% if scan_running %}
-    A scan is currently running&hellip;
-  {% elif last_scan %}
-    Last scan{% if last_scan_at %} ({{ last_scan_at[:16].replace('T', ' ') }} UTC){% endif %}:
-    {% if last_scan.error %}
-      failed &mdash; {{ last_scan.error }}
-    {% elif last_scan.skipped %}
-      skipped &mdash; {{ last_scan.reason }}
+  <p>
+    Status:
+    {% if src.authenticated %}
+      <strong style="color:#1a7f37">Authenticated</strong>
     {% else %}
-      {{ last_scan.downloaded }} downloaded, {{ last_scan.failed }} failed, {{ last_scan.skipped }} already had
+      <strong style="color:#c00">Not authenticated</strong> &mdash; <a href="/auth/{{ src.key }}">log in</a>
     {% endif %}
+  </p>
+
+  <p id="scanStatus-{{ src.key }}">
+    {% if src.scan_running %}
+      A scan is currently running&hellip;
+    {% elif src.last_scan %}
+      Last scan{% if src.last_scan_at %} ({{ src.last_scan_at[:16].replace('T', ' ') }} UTC){% endif %}:
+      {% if src.last_scan.error %}
+        failed &mdash; {{ src.last_scan.error }}
+      {% elif src.last_scan.skipped %}
+        skipped &mdash; {{ src.last_scan.reason }}
+      {% else %}
+        {{ src.last_scan.downloaded }} downloaded, {{ src.last_scan.failed }} failed, {{ src.last_scan.skipped }} already had
+      {% endif %}
+    {% else %}
+      No scan has run yet.
+    {% endif %}
+  </p>
+
+  <form method="post" action="/scan/{{ src.key }}">
+    <button type="submit" {% if not src.authenticated %}disabled{% endif %}>Scan Now</button>
+  </form>
+
+  <pre id="scanLog-{{ src.key }}" style="max-height: 400px; overflow-y: auto; background: #111; color: #ddd; padding: 1rem; margin-top: 1rem; font-size: 0.85rem;">{{ src.scan_log }}</pre>
+
+  <h3 style="margin-top: 1.5rem;">Current {{ 'Shelf' if src.key == 'libby' else 'Library' }}</h3>
+  {% if src.shelf %}
+  <table>
+    <thead>
+      <tr><th>Title</th><th>Author</th><th>Status</th><th>Downloaded</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for b in src.shelf %}
+      <tr>
+        <td>{{ b.title }}</td>
+        <td>{{ b.author }}</td>
+        <td class="status-{{ b.status }}">{{ b.status }}{% if b.error %} ({{ b.error }}){% endif %}</td>
+        <td>{{ b.downloaded_at[:16].replace('T', ' ') if b.downloaded_at else '—' }}</td>
+        <td>
+          {% if b.status in ('complete', 'failed') %}
+          <form method="post" action="/rebook/{{ src.key }}/{{ b.loan_id }}" style="margin:0;">
+            <button type="submit" {% if src.scan_running %}disabled{% endif %}>Re-download</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
   {% else %}
-    No scan has run yet.
+  <p>Nothing found as of the last scan{% if not src.last_scan %} (no scan has run yet){% endif %}.</p>
   {% endif %}
-</p>
-
-<form method="post" action="/scan">
-  <button type="submit" {% if not authenticated %}disabled{% endif %}>Scan Now</button>
-</form>
-
-<pre id="scanLog" style="max-height: 400px; overflow-y: auto; background: #111; color: #ddd; padding: 1rem; margin-top: 1rem; font-size: 0.85rem;">{{ scan_log }}</pre>
-
-<h2 style="margin-top: 2rem;">Current Shelf</h2>
-{% if shelf %}
-<table>
-  <thead>
-    <tr><th>Title</th><th>Author</th><th>Status</th><th>Downloaded</th><th></th></tr>
-  </thead>
-  <tbody>
-    {% for b in shelf %}
-    <tr>
-      <td>{{ b.title }}</td>
-      <td>{{ b.author }}</td>
-      <td class="status-{{ b.status }}">{{ b.status }}{% if b.error %} ({{ b.error }}){% endif %}</td>
-      <td>{{ b.downloaded_at[:16].replace('T', ' ') if b.downloaded_at else '—' }}</td>
-      <td>
-        {% if b.status in ('complete', 'failed') %}
-        <form method="post" action="/rebook/{{ b.loan_id }}" style="margin:0;">
-          <button type="submit" {% if scan_running %}disabled{% endif %}>Re-download</button>
-        </form>
-        {% endif %}
-      </td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
-{% else %}
-<p>Nothing on the shelf as of the last scan{% if not last_scan %} (no scan has run yet){% endif %}.</p>
-{% endif %}
+</section>
+{% endfor %}
 
 <script>
-let polling = false;
+const pollingSources = new Set();
 
-function formatResult(r) {
-  if (!r || Object.keys(r).length === 0) return 'No scan has run yet.';
-  if (r.error) return `Last scan failed — ${r.error}`;
-  if (r.skipped) return `Last scan skipped — ${r.reason}`;
-  return `Last scan: ${r.downloaded} downloaded, ${r.failed} failed, ${r.skipped} already had`;
-}
-
-async function pollLog() {
-  const resp = await fetch('/scan/log');
+async function pollLog(source) {
+  const resp = await fetch(`/scan/${source}/log`);
   const data = await resp.json();
 
-  const logEl = document.getElementById('scanLog');
+  const logEl = document.getElementById(`scanLog-${source}`);
   const wasScrolledToBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 10;
   logEl.textContent = data.log;
   if (wasScrolledToBottom) {
@@ -84,9 +83,9 @@ async function pollLog() {
   }
 
   if (data.running) {
-    document.getElementById('scanStatus').textContent = 'A scan is currently running…';
-    setTimeout(pollLog, 2000);
-  } else if (polling) {
+    document.getElementById(`scanStatus-${source}`).textContent = 'A scan is currently running…';
+    setTimeout(() => pollLog(source), 2000);
+  } else if (pollingSources.has(source)) {
     // A scan that was running just finished -- reload to pick up the
     // updated shelf/history/status rather than reimplementing that
     // rendering in JS.
@@ -94,11 +93,13 @@ async function pollLog() {
   }
 }
 
-// Keep polling if a scan is already running when the page loads (e.g. the
-// scheduled scan kicked off, or you reloaded mid-scan).
-if ({{ 'true' if scan_running else 'false' }}) {
-  polling = true;
-  pollLog();
+// Keep polling any source that's already scanning when the page loads
+// (e.g. its scheduled scan kicked off, or you reloaded mid-scan).
+{% for src in sources %}
+if ({{ 'true' if src.scan_running else 'false' }}) {
+  pollingSources.add('{{ src.key }}');
+  pollLog('{{ src.key }}');
 }
+{% endfor %}
 </script>
 {% endblock %}

@@ -1,16 +1,17 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>Authentication</h1>
+<h1>{{ label }} Authentication</h1>
 <p id="status">{{ status.message }}</p>
 
 <button id="loginBtn" onclick="startLogin()">Log In / Re-authenticate</button>
 
 <div id="vncWrap" style="display:none; margin-top:1rem;">
-  <p>Log in to Libby below, just like you would in a normal browser tab. Once your shelf is visible, this page updates itself automatically.</p>
+  <p>Log in to {{ label }} below, just like you would in a normal browser tab. Once your shelf/library is visible, this page updates itself automatically.</p>
   <iframe id="vnc"></iframe>
 </div>
 
 <script>
+const source = '{{ source }}';
 const vncPort = {{ vnc_port }};
 
 function vncUrl() {
@@ -18,15 +19,20 @@ function vncUrl() {
 }
 
 async function startLogin() {
+  const resp = await fetch(`/auth/${source}/start`, {method: 'POST'});
+  const data = await resp.json();
+  if (data.started === false) {
+    document.getElementById('status').textContent = data.reason;
+    return;
+  }
   const vnc = document.getElementById('vnc');
   vnc.src = vncUrl();
   document.getElementById('vncWrap').style.display = 'block';
-  await fetch('/auth/start', {method: 'POST'});
   poll();
 }
 
 async function poll() {
-  const resp = await fetch('/auth/status');
+  const resp = await fetch(`/auth/${source}/status`);
   const data = await resp.json();
   document.getElementById('status').textContent = data.message;
   if (data.in_progress) {
