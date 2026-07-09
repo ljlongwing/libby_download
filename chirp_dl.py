@@ -347,9 +347,21 @@ class ChirpDownloader:
         if "library" not in page.url.lower():
             await page.goto(CHIRP_URL + "/library", wait_until="load")
 
-        # Scroll to bottom to trigger lazy loading
-        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        await page.wait_for_timeout(2000)
+        # Chirp lazy-loads library cards via infinite scroll rather than
+        # numbered pages (~20 cards per batch) -- keep scrolling to the
+        # bottom until the card count stops growing, so libraries bigger
+        # than one batch are fully captured instead of only the most
+        # recent ~20. Cheap/fast for smaller libraries too: the loop exits
+        # on the first iteration once the count stabilizes, so this is a
+        # no-op in practice for anyone with under ~20 books.
+        prev_count = -1
+        for _ in range(30):
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await page.wait_for_timeout(1500)
+            count = await page.locator('[data-testid="user-audiobook-card"]').count()
+            if count == prev_count:
+                break
+            prev_count = count
         await page.evaluate("window.scrollTo(0, 0)")
         await page.wait_for_timeout(1000)
 
