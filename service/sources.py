@@ -30,7 +30,12 @@ SOURCES = {
         "label": "Chirp",
         "downloader_cls": chirp_dl.ChirpDownloader,
         "session_file": chirp_dl.SESSION_FILE,
-        "login_url": chirp_dl.CHIRP_URL,
+        # _is_logged_in() only recognizes a URL containing "library", and
+        # (unlike Libby's root, which auto-redirects to /shelf) Chirp's
+        # bare root doesn't reliably land there on its own -- the CLI's
+        # own _ensure_authenticated() explicitly appends /library for the
+        # same reason.
+        "login_url": chirp_dl.CHIRP_URL + "/library",
         # Chirp's shelf has no numeric id; the player href (e.g.
         # "/player/34151152") is the closest stable, unique identifier.
         "get_loan_id": lambda book: book.get("href", ""),

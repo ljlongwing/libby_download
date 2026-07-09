@@ -120,54 +120,80 @@ async def scan_once(source: str) -> dict:
 
                 async with async_playwright() as pw:
                     browser, context, page, player_page = await downloader._launch_browser_context(pw)
+                    session_expired = False
                     try:
-                        books = await downloader._get_shelf(page)
-                        db.sync_shelf(source, [
-                            {
-                                "loan_id": cfg["get_loan_id"](b),
-                                "title": b.get("title", ""),
-                                "author": b.get("author", ""),
-                                "card_id": cfg["get_card_id"](b),
-                            }
-                            for b in books
-                        ])
-                        for book in books:
-                            loan_id = cfg["get_loan_id"](book)
-                            if not loan_id:
-                                continue
-                            if db.is_downloaded(source, loan_id):
-                                skipped += 1
-                                continue
+                        # _launch_browser_context only loads the saved
+                        # session's cookies; it never confirms they're
+                        # still valid. Without this check, an expired
+                        # session silently scrapes a login/redirect page,
+                        # finds no books, and reports it identically to a
+                        # genuinely empty shelf -- no way to tell the two
+                        # apart. Same navigate-then-check sequence already
+                        # proven by _ensure_authenticated (CLI) and
+                        # auth_session.py (web login), just without the
+                        # interactive wait: a scheduled scan can't sit
+                        # around for a human, so an invalid session here is
+                        # reported plainly instead.
+                        await page.goto(cfg["login_url"], wait_until="load", timeout=60_000)
+                        await page.wait_for_timeout(2_000)
 
-                            title = book.get("title", "")
-                            author = book.get("author", "")
-                            card_id = cfg["get_card_id"](book)
-                            db.upsert_book(source, loan_id, title, author, status="downloading", card_id=card_id)
+                        if not await downloader._is_logged_in(page):
+                            session_expired = True
+                        else:
+                            books = await downloader._get_shelf(page)
+                            db.sync_shelf(source, [
+                                {
+                                    "loan_id": cfg["get_loan_id"](b),
+                                    "title": b.get("title", ""),
+                                    "author": b.get("author", ""),
+                                    "card_id": cfg["get_card_id"](b),
+                                }
+                                for b in books
+                            ])
+                            for book in books:
+                                loan_id = cfg["get_loan_id"](book)
+                                if not loan_id:
+                                    continue
+                                if db.is_downloaded(source, loan_id):
+                                    skipped += 1
+                                    continue
 
-                            try:
-                                await downloader._download_selected_book(page, context, player_page, book)
-                                db.upsert_book(
-                                    source, loan_id, title, author, status="complete", card_id=card_id,
-                                    output_path=str(downloader.output_dir), mark_downloaded=True,
-                                )
-                                downloaded += 1
-                            except Exception as e:
-                                logger.exception("[%s] Download failed for %r", source, title)
-                                db.upsert_book(
-                                    source, loan_id, title, author, status="failed", card_id=card_id, error=str(e),
-                                )
-                                failed += 1
+                                title = book.get("title", "")
+                                author = book.get("author", "")
+                                card_id = cfg["get_card_id"](book)
+                                db.upsert_book(source, loan_id, title, author, status="downloading", card_id=card_id)
+
+                                try:
+                                    await downloader._download_selected_book(page, context, player_page, book)
+                                    db.upsert_book(
+                                        source, loan_id, title, author, status="complete", card_id=card_id,
+                                        output_path=str(downloader.output_dir), mark_downloaded=True,
+                                    )
+                                    downloaded += 1
+                                except Exception as e:
+                                    logger.exception("[%s] Download failed for %r", source, title)
+                                    db.upsert_book(
+                                        source, loan_id, title, author, status="failed", card_id=card_id, error=str(e),
+                                    )
+                                    failed += 1
                     finally:
-                        try:
-                            await context.storage_state(path=str(cfg["session_file"]), indexed_db=True)
-                        except Exception:
+                        # Only overwrite the saved session if it's still
+                        # good -- persisting an expired/logged-out state
+                        # would make re-authenticating pointless.
+                        if not session_expired:
                             try:
-                                await context.storage_state(path=str(cfg["session_file"]))
+                                await context.storage_state(path=str(cfg["session_file"]), indexed_db=True)
                             except Exception:
-                                pass
+                                try:
+                                    await context.storage_state(path=str(cfg["session_file"]))
+                                except Exception:
+                                    pass
                         await browser.close()
 
-                result = {"downloaded": downloaded, "failed": failed, "skipped": skipped}
+                if session_expired:
+                    result = {"not_run": True, "reason": "Session expired or invalid — please re-authenticate."}
+                else:
+                    result = {"downloaded": downloaded, "failed": failed, "skipped": skipped}
             except Exception as e:
                 logger.exception("[%s] Scan failed", source)
                 result = {"error": str(e)}
