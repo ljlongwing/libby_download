@@ -20,9 +20,6 @@ chirp_downloads/
 # Leftover temporary artwork
 coverArt.jpg
 
-# --- Java (Legacy) ---
-legacy_java_tool/
-
 # --- PyInstaller build output ---
 build/
 dist/
