@@ -19,7 +19,7 @@
     {% if src.scan_running %}
       A scan is currently running&hellip;
     {% elif src.last_scan %}
-      Last scan{% if src.last_scan_at %} ({{ src.last_scan_at[:16].replace('T', ' ') }} UTC){% endif %}:
+      Last scan{% if src.last_scan_at %} (<time class="local-time" datetime="{{ src.last_scan_at }}">{{ src.last_scan_at }}</time>){% endif %}:
       {% if src.last_scan.error %}
         failed &mdash; {{ src.last_scan.error }}
       {% elif src.last_scan.not_run %}
@@ -33,7 +33,7 @@
   </p>
   <p id="nextScan-{{ src.key }}" style="color:#666; font-size:0.9rem;">
     {% if not src.scan_running and src.next_scan_at %}
-      Next scan: {{ src.next_scan_at[:16].replace('T', ' ') }} UTC
+      Next scan: <time class="local-time" datetime="{{ src.next_scan_at }}">{{ src.next_scan_at }}</time>
     {% endif %}
   </p>
 
@@ -55,7 +55,7 @@
         <td>{{ b.title }}</td>
         <td>{{ b.author }}</td>
         <td class="status-{{ b.status }}">{{ b.status }}{% if b.error %} ({{ b.error }}){% endif %}</td>
-        <td>{{ b.downloaded_at[:16].replace('T', ' ') if b.downloaded_at else '—' }}</td>
+        <td>{% if b.downloaded_at %}<time class="local-time" datetime="{{ b.downloaded_at }}">{{ b.downloaded_at }}</time>{% else %}&mdash;{% endif %}</td>
         <td>
           {% if b.status in ('complete', 'failed') %}
           <form method="post" action="/rebook/{{ src.key }}/{{ b.loan_id }}" style="margin:0;">

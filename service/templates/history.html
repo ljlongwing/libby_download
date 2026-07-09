@@ -12,8 +12,8 @@
       <td>{{ b.title }}</td>
       <td>{{ b.author }}</td>
       <td class="status-{{ b.status }}">{{ b.status }}{% if b.error %} ({{ b.error }}){% endif %}</td>
-      <td>{{ b.first_seen_at }}</td>
-      <td>{{ b.downloaded_at or '' }}</td>
+      <td><time class="local-time" datetime="{{ b.first_seen_at }}">{{ b.first_seen_at }}</time></td>
+      <td>{% if b.downloaded_at %}<time class="local-time" datetime="{{ b.downloaded_at }}">{{ b.downloaded_at }}</time>{% endif %}</td>
       <td>{{ b.output_path or '' }}</td>
     </tr>
     {% else %}

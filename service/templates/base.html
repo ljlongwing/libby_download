@@ -27,5 +27,23 @@
     <a href="/config">Config</a>
   </nav>
   {% block content %}{% endblock %}
+  <script>
+    // Every timestamp is rendered server-side in UTC (as an ISO string in
+    // the datetime attribute, with that same UTC string as fallback text
+    // for no-JS cases) and converted here to whatever timezone the
+    // viewer's own browser is in -- avoids having to configure a timezone
+    // for the container/deployer, which may not match whoever's actually
+    // looking at the dashboard.
+    document.querySelectorAll('.local-time').forEach(el => {
+      const iso = el.getAttribute('datetime');
+      if (!iso) return;
+      const d = new Date(iso);
+      if (isNaN(d)) return;
+      el.textContent = d.toLocaleString(undefined, {
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit',
+      });
+    });
+  </script>
 </body>
 </html>
