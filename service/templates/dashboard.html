@@ -31,6 +31,11 @@
       No scan has run yet.
     {% endif %}
   </p>
+  <p id="nextScan-{{ src.key }}" style="color:#666; font-size:0.9rem;">
+    {% if not src.scan_running and src.next_scan_at %}
+      Next scan: {{ src.next_scan_at[:16].replace('T', ' ') }} UTC
+    {% endif %}
+  </p>
 
   <form method="post" action="/scan/{{ src.key }}">
     <button type="submit" {% if not src.authenticated %}disabled{% endif %}>Scan Now</button>
@@ -101,5 +106,25 @@ if ({{ 'true' if src.scan_running else 'false' }}) {
   pollLog('{{ src.key }}');
 }
 {% endfor %}
+
+// Heartbeat: sources that aren't actively being polled (nothing running
+// when this page loaded) still get checked occasionally, so a scheduled
+// scan that starts while you're already sitting on this tab gets noticed
+// and switches into live polling instead of silently running unseen until
+// a manual refresh.
+const allSources = [{% for src in sources %}'{{ src.key }}'{{ ',' if not loop.last }}{% endfor %}];
+async function heartbeat() {
+  for (const source of allSources) {
+    if (pollingSources.has(source)) continue;
+    const resp = await fetch(`/scan/${source}/log`);
+    const data = await resp.json();
+    if (data.running) {
+      pollingSources.add(source);
+      pollLog(source);
+    }
+  }
+  setTimeout(heartbeat, 30000);
+}
+setTimeout(heartbeat, 30000);
 </script>
 {% endblock %}

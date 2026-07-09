@@ -10,7 +10,7 @@ is no per-source branching in the scan logic itself.
 import asyncio
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from playwright.async_api import async_playwright
@@ -25,6 +25,9 @@ logger = logging.getLogger("libby_service.worker")
 _scan_running: dict[str, bool] = {s: False for s in SOURCES}
 last_scan_result: dict[str, dict] = {s: {} for s in SOURCES}
 last_scan_at: dict[str, str] = {s: "" for s in SOURCES}
+# Set once a scan finishes and the loop knows how long it's sleeping for;
+# "" until the first scan for a source has completed at least once.
+next_scan_at: dict[str, str] = {s: "" for s in SOURCES}
 
 # Serializes the stdout-sensitive part of scan_once() across sources -- see
 # the docstring there for why concurrent scans can't just tee independently.
@@ -193,4 +196,6 @@ async def loop_forever(source: str) -> None:
             interval_minutes = float(db.get_config(f"{source}_scan_interval_minutes") or 15)
         except ValueError:
             interval_minutes = 15
-        await asyncio.sleep(max(60.0, interval_minutes * 60))
+        sleep_s = max(60.0, interval_minutes * 60)
+        next_scan_at[source] = (datetime.now(timezone.utc) + timedelta(seconds=sleep_s)).isoformat()
+        await asyncio.sleep(sleep_s)

@@ -60,6 +60,7 @@ async def dashboard(request: Request):
             "authenticated": cfg["session_file"].exists(),
             "last_scan": worker.last_scan_result[key],
             "last_scan_at": worker.last_scan_at[key],
+            "next_scan_at": worker.next_scan_at[key],
             "scan_running": worker._scan_running[key],
             "scan_log": "\n".join(worker.scan_log[key]),
             "shelf": db.list_shelf(key),
@@ -81,6 +82,7 @@ async def scan_log(source: str):
         "running": worker._scan_running[source],
         "last_result": worker.last_scan_result[source],
         "log": "\n".join(worker.scan_log[source]),
+        "next_scan_at": worker.next_scan_at[source],
     }
 
 
