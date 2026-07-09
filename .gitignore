@@ -17,9 +17,6 @@ MyBooks/
 libby_downloads/
 chirp_downloads/
 
-# Leftover temporary artwork
-coverArt.jpg
-
 # --- PyInstaller build output ---
 build/
 dist/
