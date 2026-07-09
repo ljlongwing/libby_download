@@ -545,7 +545,7 @@ class ChirpDownloader:
 
     async def _download_chapters(self, page: Page, book_name: str) -> int:
         total = len(self.toc)
-        print(f"\nDownloading {total} chapter(s) → {self.output_dir.resolve()}/")
+        print(f"\nDownloading {total} chapter(s) -> {self.output_dir.resolve()}/")
 
         cover_path = self._download_cover()
 

@@ -388,10 +388,21 @@ class LibbyDownloader:
     async def _get_shelf(self, page: Page) -> list[dict]:
         print("Loading shelf...")
 
-        # Primary strategy: intercept the JSON shelf/loans API response.
+        # Sole strategy: intercept the JSON shelf-sync API response
+        # (sentry.libbyapp.com/chip/sync, which carries a 'loans' list).
         # We set up the listener BEFORE navigating so we don't miss the call.
+        #
+        # Confirmed live (both against a populated shelf and a genuinely
+        # empty one) that this call always fires on a normal /shelf load, so
+        # the localStorage/DOM-scrape strategies that used to sit behind it
+        # were dead code in practice -- worse, an empty-but-valid response
+        # (0 loans) was indistinguishable from "interception never saw
+        # anything", so every empty-shelf load cascaded through both unused
+        # fallbacks and printed their diagnostic noise for no reason. Fixed
+        # by tracking whether we saw a shelf-shaped response at all,
+        # independent of whether it happened to contain any loans.
         api_loans: list[dict] = []
-        api_done = asyncio.Event()
+        api_response_seen = asyncio.Event()
 
         async def _on_shelf_response(resp) -> None:
             try:
@@ -401,12 +412,12 @@ class LibbyDownloader:
                 if "json" not in ct:
                     return
                 data = await resp.json()
-                # Accept any JSON body that contains a 'loans' or 'items' list
-                # with objects that have a 'title' field.
-                raw = data.get("loans") or data.get("items") or []
-                if not isinstance(raw, list) or not raw:
+                if not isinstance(data, dict) or ("loans" not in data and "items" not in data):
                     return
-                added = 0
+                raw = data.get("loans") or data.get("items") or []
+                api_response_seen.set()
+                if not isinstance(raw, list):
+                    return
                 for loan in raw:
                     if not isinstance(loan, dict) or not loan.get("title"):
                         continue
@@ -421,9 +432,6 @@ class LibbyDownloader:
                         "href": None,
                         "cover_url": _cover_url_from_covers(loan.get("covers")),
                     })
-                    added += 1
-                if added:
-                    api_done.set()
             except Exception:
                 pass
 
@@ -434,7 +442,7 @@ class LibbyDownloader:
             await page.goto(LIBBY_URL + "/shelf", wait_until="load", timeout=30_000)
             await page.wait_for_timeout(2_000)
             try:
-                await asyncio.wait_for(api_done.wait(), timeout=8)
+                await asyncio.wait_for(api_response_seen.wait(), timeout=8)
             except asyncio.TimeoutError:
                 pass
         except Exception:
@@ -442,11 +450,13 @@ class LibbyDownloader:
         finally:
             page.remove_listener("response", _on_shelf_response)
 
-        if api_loans:
+        if api_response_seen.is_set():
             return sorted(api_loans, key=lambda b: b.get("title", "").lower())
 
-        # Second strategy: read from localStorage (Libby caches shelf data).
-        print("API interception found nothing — trying localStorage...")
+        # Fallback: the shelf-sync call was never observed at all (blocked,
+        # renamed, or a page layout change) -- read from localStorage
+        # (Libby caches shelf data there too).
+        print("Shelf API call not detected — trying localStorage...")
         try:
             ls_books: list[dict] = await page.evaluate("""
                 () => {
@@ -648,77 +658,24 @@ class LibbyDownloader:
     async def _extract_bifocal(self, page: Page) -> None:
         """Extract metadata and TOC from the player.
 
-        Tries three strategies in order:
-        1. window.__BIFOCAL_DATA__ (populated by the player JS)
-        2. <script id="BIFOCAL-data"> tag (older Libby versions)
-        3. The visible Table of Contents panel in the player UI
+        The UI table-of-contents scrape is tried first -- confirmed via live
+        testing to reliably work against the current Libby player, and it's
+        self-sufficient (chapters, duration, and title/author/narrator/
+        description all come from it). The window-global/script-tag BIFOCAL
+        JSON lookup has not been observed to succeed in practice (it would
+        also add readingOrder-based precise seeking if it ever did), so it's
+        kept only as a fallback for whatever data the UI scrape didn't find,
+        rather than paid on every run.
         """
         print("Extracting metadata...")
 
-        bifocal_js = r"""
-            () => {
-                // Strategy 1: well-known global variables.
-                for (const name of ['__BIFOCAL_DATA__', 'BIFOCAL_DATA', '__bifocal__',
-                                    'bifocalData', '__OD_DATA__', '__READER_DATA__']) {
-                    if (window[name] && typeof window[name] === 'object'
-                            && (window[name].readingOrder || window[name].nav))
-                        return window[name];
-                }
-
-                // Strategy 2: <script id="BIFOCAL-data"> tag (older Libby).
-                const el = document.getElementById('BIFOCAL-data');
-                if (el) {
-                    for (const line of el.textContent.split('\n')) {
-                        const eq = line.indexOf('=');
-                        if (eq < 0) continue;
-                        const val = line.slice(eq + 1).trim().replace(/;$/, '');
-                        if (val.startsWith('{')) {
-                            try { return JSON.parse(val); } catch (_) {}
-                        }
-                    }
-                }
-
-                // Strategy 3: scan all inline <script> tags for JSON containing
-                // readingOrder (the key BIFOCAL field we rely on).
-                for (const s of document.querySelectorAll('script:not([src])')) {
-                    const txt = s.textContent;
-                    if (!txt.includes('readingOrder')) continue;
-                    // Find the outermost {...} that contains readingOrder.
-                    let depth = 0, start = -1;
-                    for (let i = 0; i < txt.length; i++) {
-                        if (txt[i] === '{') { if (depth++ === 0) start = i; }
-                        else if (txt[i] === '}') {
-                            if (--depth === 0 && start >= 0) {
-                                try {
-                                    const obj = JSON.parse(txt.slice(start, i + 1));
-                                    if (obj.readingOrder || obj.nav) return obj;
-                                } catch (_) {}
-                                start = -1;
-                            }
-                        }
-                    }
-                }
-                return null;
-            }
-        """
-
-        data: Optional[dict] = None
         frames_to_check = [page.main_frame] + [
             f for f in page.frames if f is not page.main_frame
         ]
-        # Give the player a moment to populate its globals.
-        await page.wait_for_timeout(6_000)
-        for frame in frames_to_check:
-            try:
-                data = await frame.evaluate(bifocal_js)
-                if data:
-                    break
-            except Exception:
-                continue
 
-        if not data:
-            # Strategy 3: scrape the visible TOC panel in the player UI.
-            data = await self._extract_toc_from_ui(page)
+        data: Optional[dict] = await self._extract_toc_from_ui(page)
+        if not data or not data.get("nav", {}).get("toc"):
+            data = await self._extract_bifocal_json(page, frames_to_check)
 
         if not data:
             print("  Warning: could not extract metadata; metadata will be empty.")
@@ -826,6 +783,76 @@ class LibbyDownloader:
             f"  TOC:      {sum(len(v) for v in self.toc.values())} chapters\n"
             f"  Duration: {dur_str}"
         )
+
+    async def _extract_bifocal_json(self, page: Page, frames_to_check: list) -> Optional[dict]:
+        """Fallback when the UI TOC scrape finds nothing: look for the raw
+        BIFOCAL JSON the player would normally populate, via (1) well-known
+        window globals or (2) an embedded <script id="BIFOCAL-data"> tag,
+        falling back further to (3) scanning all inline <script> tags for
+        JSON containing readingOrder. Not observed to succeed in live
+        testing against the current player, but kept in case a different
+        book/session/Libby build ever does expose it -- if it does, it also
+        yields readingOrder for more precise seeking than the TOC-click
+        approach.
+        """
+        bifocal_js = r"""
+            () => {
+                // Strategy 1: well-known global variables.
+                for (const name of ['__BIFOCAL_DATA__', 'BIFOCAL_DATA', '__bifocal__',
+                                    'bifocalData', '__OD_DATA__', '__READER_DATA__']) {
+                    if (window[name] && typeof window[name] === 'object'
+                            && (window[name].readingOrder || window[name].nav))
+                        return window[name];
+                }
+
+                // Strategy 2: <script id="BIFOCAL-data"> tag (older Libby).
+                const el = document.getElementById('BIFOCAL-data');
+                if (el) {
+                    for (const line of el.textContent.split('\n')) {
+                        const eq = line.indexOf('=');
+                        if (eq < 0) continue;
+                        const val = line.slice(eq + 1).trim().replace(/;$/, '');
+                        if (val.startsWith('{')) {
+                            try { return JSON.parse(val); } catch (_) {}
+                        }
+                    }
+                }
+
+                // Strategy 3: scan all inline <script> tags for JSON containing
+                // readingOrder (the key BIFOCAL field we rely on).
+                for (const s of document.querySelectorAll('script:not([src])')) {
+                    const txt = s.textContent;
+                    if (!txt.includes('readingOrder')) continue;
+                    // Find the outermost {...} that contains readingOrder.
+                    let depth = 0, start = -1;
+                    for (let i = 0; i < txt.length; i++) {
+                        if (txt[i] === '{') { if (depth++ === 0) start = i; }
+                        else if (txt[i] === '}') {
+                            if (--depth === 0 && start >= 0) {
+                                try {
+                                    const obj = JSON.parse(txt.slice(start, i + 1));
+                                    if (obj.readingOrder || obj.nav) return obj;
+                                } catch (_) {}
+                                start = -1;
+                            }
+                        }
+                    }
+                }
+                return null;
+            }
+        """
+
+        # Give the player a moment to populate its globals -- only paid when
+        # this fallback actually runs, not on every book.
+        await page.wait_for_timeout(6_000)
+        for frame in frames_to_check:
+            try:
+                data = await frame.evaluate(bifocal_js)
+                if data:
+                    return data
+            except Exception:
+                continue
+        return None
 
     async def _extract_toc_from_ui(self, page: Page) -> Optional[dict]:
         """Click the TOC/Chapters button in the player UI and scrape chapter
@@ -2096,7 +2123,7 @@ class LibbyDownloader:
         print(f"Warning: {diff_display}s of audio unaccounted for — some parts may be missing.")
 
     async def _download_all(self, book_name: str) -> None:
-        print(f"\nDownloading {len(self.captured)} file(s) → {self.output_dir.resolve()}/")
+        print(f"\nDownloading {len(self.captured)} file(s) -> {self.output_dir.resolve()}/")
 
         cover_path = self.output_dir / "coverArt.jpg"
         cover_url = self.metadata.get("cover_url", "")
@@ -2319,7 +2346,7 @@ class LibbyDownloader:
 
         chapters_dir = self.output_dir / "chapters"
         chapters_dir.mkdir(exist_ok=True)
-        print(f"\nSplitting into chapters → {chapters_dir.resolve()}/")
+        print(f"\nSplitting into chapters -> {chapters_dir.resolve()}/")
 
         track = 1
         for file_name in sorted(by_file.keys(), key=_part_number):
