@@ -1,7 +1,8 @@
-# Libby auto-download service: FastAPI web UI + background scan loop,
-# reusing libby_dl.py directly. Includes Xvfb + x11vnc + noVNC/websockify so
-# the (re-)authentication flow can stream a real, interactive browser into
-# the web UI -- see service/entrypoint.sh and service/auth_session.py.
+# Libby + Chirp auto-download service: FastAPI web UI + one background scan
+# loop per source, reusing libby_dl.py/chirp_dl.py directly. Includes
+# Xvfb + x11vnc + noVNC/websockify so the (re-)authentication flow can
+# stream a real, interactive browser into the web UI -- see
+# service/entrypoint.sh and service/auth_session.py.
 
 FROM python:3.12-slim
 
@@ -23,7 +24,7 @@ COPY service/requirements.txt ./service/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt -r service/requirements.txt \
     && playwright install --with-deps chromium
 
-COPY libby_dl.py ./
+COPY libby_dl.py chirp_dl.py ./
 COPY service/ ./service/
 RUN chmod +x ./service/entrypoint.sh
 

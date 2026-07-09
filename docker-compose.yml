@@ -12,8 +12,9 @@ services:
       # must match whatever host port VNC_PORT above actually publishes.
       - VNC_PORT=${VNC_PORT:-6080}
     volumes:
-      # App state: session file (.libby_session.json) + the SQLite
-      # history/config db. Defaults to the "libby-data" named
+      # App state: both sources' session files (.libby_session.json,
+      # .chirp_session.json) + the SQLite history/config db. Defaults to
+      # the "libby-data" named
       # (Docker-managed) volume declared below -- not a relative bind mount
       # like ./data, which Portainer's "Repository" stack build can silently
       # resolve to a fresh, empty directory on every redeploy (this is why

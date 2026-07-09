@@ -4,16 +4,16 @@ This repo contains two related, standalone tools that are provided for **educati
 
 *   **`libby_dl.py`** — downloads your borrowed audiobooks from **Libby** (libbyapp.com).
 *   **`chirp_dl.py`** — downloads your purchased audiobooks from **Chirp Books** (chirpbooks.com).
-*   **`service/`** — an optional self-hosted web service that runs `libby_dl.py` automatically on a schedule (see below), so borrowing a book in Libby gets it downloaded without you running anything by hand.
+*   **`service/`** — an optional self-hosted web service that runs both tools automatically on a schedule (see below), so borrowing a book in Libby or owning one on Chirp gets it downloaded without you running anything by hand.
 
 ### 🐳 Automated download service (Docker)
 
-`service/` packages a small always-on service around `libby_dl.py`:
+`service/` packages a small always-on service around `libby_dl.py` **and** `chirp_dl.py` — one container, one dashboard, two independent scan loops (each on its own configurable interval):
 
-- **Background scanning** — checks your Libby shelf every N minutes (configurable) and downloads anything new, skipping books it's already grabbed.
-- **Web dashboard** — status, a manual "Scan Now" button, and download **history**.
-- **In-browser (re-)authentication** — Libby login has to happen on Libby's own page (library card + PIN), so the container runs a real browser on a virtual display and streams it into the web UI via noVNC — you log in right there in your browser tab, no separate script or window needed, including whenever a session eventually expires.
-- **Config page** — change the output directory or scan interval without editing files.
+- **Background scanning** — checks your Libby shelf and your Chirp library on their own schedules, downloading anything new and skipping what it's already grabbed.
+- **Web dashboard** — one status/shelf/log panel per source, a manual "Scan Now" button each, and a combined download **history** (with a Source column).
+- **In-browser (re-)authentication** — login has to happen on the source's own page (library card + PIN for Libby, account login for Chirp), so the container runs a real browser on a virtual display and streams it into the web UI via noVNC — you log in right there in your browser tab, no separate script or window needed, including whenever a session eventually expires. Only one source can be logging in at a time (they share the same display); scans aren't affected by this.
+- **Config page** — change the shared output directory or either source's scan interval without editing files.
 
 Run it with Docker Compose:
 
