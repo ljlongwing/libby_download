@@ -22,7 +22,7 @@
       Last scan{% if src.last_scan_at %} ({{ src.last_scan_at[:16].replace('T', ' ') }} UTC){% endif %}:
       {% if src.last_scan.error %}
         failed &mdash; {{ src.last_scan.error }}
-      {% elif src.last_scan.skipped %}
+      {% elif src.last_scan.not_run %}
         skipped &mdash; {{ src.last_scan.reason }}
       {% else %}
         {{ src.last_scan.downloaded }} downloaded, {{ src.last_scan.failed }} failed, {{ src.last_scan.skipped }} already had

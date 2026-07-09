@@ -89,10 +89,10 @@ async def scan_once(source: str) -> dict:
     cfg = SOURCES[source]
 
     if _scan_running[source]:
-        return {"skipped": True, "reason": "scan already in progress"}
+        return {"not_run": True, "reason": "scan already in progress"}
 
     if not cfg["session_file"].exists():
-        result = {"skipped": True, "reason": "not authenticated"}
+        result = {"not_run": True, "reason": "not authenticated"}
         last_scan_result[source] = result
         return result
 
