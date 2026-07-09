@@ -198,6 +198,20 @@ async def scan_once(source: str) -> dict:
                 logger.exception("[%s] Scan failed", source)
                 result = {"error": str(e)}
             finally:
+                # The log is just teed stdout from the downloader, which has
+                # no notion of "the scan is done" -- without this, the log
+                # trails off after whatever the downloader last printed
+                # (e.g. "Loading shelf...") and looks like it hung rather
+                # than finished.
+                if result.get("error"):
+                    print(f"\nScan failed: {result['error']}")
+                elif result.get("not_run"):
+                    print(f"\nScan not completed: {result['reason']}")
+                else:
+                    print(
+                        f"\nScan complete: {result['downloaded']} downloaded, "
+                        f"{result['failed']} failed, {result['skipped']} already had."
+                    )
                 sys.stdout = old_stdout
     finally:
         _scan_running[source] = False
