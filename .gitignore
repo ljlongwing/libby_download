@@ -23,6 +23,11 @@ coverArt.jpg
 # --- Java (Legacy) ---
 legacy_java_tool/
 
+# --- PyInstaller build output ---
+build/
+dist/
+release_assets/
+
 # --- System Files ---
 .DS_Store
 Thumbs.db
