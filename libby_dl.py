@@ -408,11 +408,22 @@ class LibbyDownloader:
             try:
                 if resp.status != 200:
                     return
+                # Match the specific shelf-sync endpoint rather than a loose
+                # "has a loans/items key" check -- other unrelated responses
+                # during page load (e.g. thunder.api.overdrive.com's
+                # libraries listing) also carry a top-level 'items' list for
+                # a completely different purpose. A loose match caused this
+                # code to treat that response as "the shelf response",
+                # remove the listener, and never actually see the real
+                # chip/sync payload that arrived after it -- resulting in a
+                # silently empty shelf even when the account has loans.
+                if "chip/sync" not in resp.url:
+                    return
                 ct = resp.headers.get("content-type", "")
                 if "json" not in ct:
                     return
                 data = await resp.json()
-                if not isinstance(data, dict) or ("loans" not in data and "items" not in data):
+                if not isinstance(data, dict):
                     return
                 raw = data.get("loans") or data.get("items") or []
                 api_response_seen.set()

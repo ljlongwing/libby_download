@@ -38,7 +38,7 @@
   </p>
 
   <form method="post" action="/scan/{{ src.key }}">
-    <button type="submit" {% if not src.authenticated %}disabled{% endif %}>Scan Now</button>
+    <button type="submit" id="scanBtn-{{ src.key }}" {% if not src.authenticated or src.scan_running %}disabled{% endif %}>{{ 'Currently scanning…' if src.scan_running else 'Scan Now' }}</button>
   </form>
 
   <pre id="scanLog-{{ src.key }}" style="max-height: 400px; overflow-y: auto; background: #111; color: #ddd; padding: 1rem; margin-top: 1rem; font-size: 0.85rem;">{{ src.scan_log }}</pre>
@@ -87,8 +87,14 @@ async function pollLog(source) {
     logEl.scrollTop = logEl.scrollHeight;
   }
 
+  const btn = document.getElementById(`scanBtn-${source}`);
+
   if (data.running) {
     document.getElementById(`scanStatus-${source}`).textContent = 'A scan is currently running…';
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Currently scanning…';
+    }
     setTimeout(() => pollLog(source), 2000);
   } else if (pollingSources.has(source)) {
     // A scan that was running just finished -- reload to pick up the
