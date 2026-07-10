@@ -3,10 +3,13 @@
 <head>
   <meta charset="utf-8">
   <title>Audiobook Auto-Download</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpath d='M10 26 Q50 2 90 26' stroke='%230b5fff' stroke-width='6' fill='none' stroke-linecap='round'/%3E%3Crect x='3' y='22' width='14' height='20' rx='6' fill='%230b5fff'/%3E%3Crect x='83' y='22' width='14' height='20' rx='6' fill='%230b5fff'/%3E%3Crect x='10' y='26' width='38' height='52' rx='4' fill='%23c98a4b'/%3E%3Crect x='52' y='26' width='38' height='52' rx='4' fill='%23a3672f'/%3E%3Cline x1='50' y1='26' x2='50' y2='78' stroke='%237a4d24' stroke-width='2'/%3E%3Cg stroke='%23f3e2c8' stroke-width='2' stroke-linecap='round'%3E%3Cline x1='17' y1='38' x2='41' y2='38'/%3E%3Cline x1='17' y1='48' x2='41' y2='48'/%3E%3Cline x1='17' y1='58' x2='41' y2='58'/%3E%3Cline x1='59' y1='38' x2='83' y2='38'/%3E%3Cline x1='59' y1='48' x2='83' y2='48'/%3E%3Cline x1='59' y1='58' x2='83' y2='58'/%3E%3C/g%3E%3C/svg%3E">
   <style>
     body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; color: #222; }
-    nav a { margin-right: 1rem; text-decoration: none; color: #0b5fff; }
-    nav { margin-bottom: 1.5rem; border-bottom: 1px solid #ddd; padding-bottom: 1rem; }
+    nav { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1.5rem; border-bottom: 1px solid #ddd; padding-bottom: 1rem; }
+    nav .brand { display: flex; align-items: center; gap: 0.5rem; margin-right: 1rem; text-decoration: none; color: #222; font-weight: 700; font-size: 1.1rem; }
+    nav a { text-decoration: none; color: #0b5fff; }
+    nav a:not(.brand) { margin-right: 1rem; }
     table { border-collapse: collapse; width: 100%; }
     th, td { text-align: left; padding: 0.5rem; border-bottom: 1px solid #eee; }
     .status-complete { color: #1a7f37; }
@@ -20,6 +23,25 @@
 </head>
 <body>
   <nav>
+    <a href="/" class="brand">
+      <svg width="28" height="28" viewBox="0 0 100 100" aria-hidden="true">
+        <path d="M10 26 Q50 2 90 26" stroke="#0b5fff" stroke-width="6" fill="none" stroke-linecap="round"/>
+        <rect x="3" y="22" width="14" height="20" rx="6" fill="#0b5fff"/>
+        <rect x="83" y="22" width="14" height="20" rx="6" fill="#0b5fff"/>
+        <rect x="10" y="26" width="38" height="52" rx="4" fill="#c98a4b"/>
+        <rect x="52" y="26" width="38" height="52" rx="4" fill="#a3672f"/>
+        <line x1="50" y1="26" x2="50" y2="78" stroke="#7a4d24" stroke-width="2"/>
+        <g stroke="#f3e2c8" stroke-width="2" stroke-linecap="round">
+          <line x1="17" y1="38" x2="41" y2="38"/>
+          <line x1="17" y1="48" x2="41" y2="48"/>
+          <line x1="17" y1="58" x2="41" y2="58"/>
+          <line x1="59" y1="38" x2="83" y2="38"/>
+          <line x1="59" y1="48" x2="83" y2="48"/>
+          <line x1="59" y1="58" x2="83" y2="58"/>
+        </g>
+      </svg>
+      Audiobook Auto-Download
+    </a>
     <a href="/">Dashboard</a>
     <a href="/auth/libby">Libby Auth</a>
     <a href="/auth/chirp">Chirp Auth</a>
