@@ -347,21 +347,39 @@ class ChirpDownloader:
         if "library" not in page.url.lower():
             await page.goto(CHIRP_URL + "/library", wait_until="load")
 
-        # Chirp lazy-loads library cards via infinite scroll rather than
-        # numbered pages (~20 cards per batch) -- keep scrolling to the
-        # bottom until the card count stops growing, so libraries bigger
-        # than one batch are fully captured instead of only the most
-        # recent ~20. Cheap/fast for smaller libraries too: the loop exits
-        # on the first iteration once the count stabilizes, so this is a
-        # no-op in practice for anyone with under ~20 books.
-        prev_count = -1
-        for _ in range(30):
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await page.wait_for_timeout(1500)
-            count = await page.locator('[data-testid="user-audiobook-card"]').count()
-            if count == prev_count:
+        # Chirp paginates library cards behind a "Load More" button (~15-20
+        # cards per batch), not infinite scroll -- confirmed live: scrolling
+        # to the bottom of /library never grew the card count on its own,
+        # while a "Load More" button (matched by visible text, not its
+        # CSS-module class name, which is build-specific and liable to
+        # change) was found driving the same pattern on a Chirp deals page,
+        # growing a live result count over repeated clicks. This also
+        # matches FetchCurrentUserAudiobooks' page/pageSize GraphQL
+        # variables observed earlier. Both pages also show a "Showing:
+        # X-Y of Z" line -- a more precise stop condition than "does the
+        # button still exist" (avoids one wasted click at the very end),
+        # kept as the primary check with the button as a fallback for
+        # when that text isn't found/parseable. Both are no-ops once
+        # everything's loaded, so this is harmless/fast for libraries that
+        # fit in the first batch too.
+        showing_re = re.compile(r"Showing:\s*\d+-(\d+)\s*of\s*(\d+)", re.IGNORECASE)
+        for _ in range(50):
+            try:
+                text = await page.locator("body").inner_text()
+                m = showing_re.search(text)
+                if m and int(m.group(1)) >= int(m.group(2)):
+                    break
+            except Exception:
+                pass
+            load_more = page.get_by_role("button", name=re.compile("load more", re.IGNORECASE))
+            try:
+                if await load_more.count() == 0:
+                    break
+                await load_more.first.scroll_into_view_if_needed(timeout=5_000)
+                await load_more.first.click(timeout=5_000)
+                await page.wait_for_timeout(1_500)
+            except Exception:
                 break
-            prev_count = count
         await page.evaluate("window.scrollTo(0, 0)")
         await page.wait_for_timeout(1000)
 
