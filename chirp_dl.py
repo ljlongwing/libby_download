@@ -362,7 +362,23 @@ class ChirpDownloader:
         # when that text isn't found/parseable. Both are no-ops once
         # everything's loaded, so this is harmless/fast for libraries that
         # fit in the first batch too.
+        # page.goto's "load" event only means the HTML/resources arrived --
+        # the book list itself is fetched and rendered client-side
+        # afterward (via GraphQL), so checking for "Load More" immediately
+        # risks seeing a still-empty page and wrongly concluding there's
+        # nothing more to load, silently truncating to just the first
+        # batch. Wait for the first real card to actually render first.
+        # This race is far more likely on a slower machine (confirmed by a
+        # tester whose antivirus sandboxes the browser process, adding
+        # real latency) than on a fast dev machine, which is exactly the
+        # gap that let this slip through testing originally.
+        try:
+            await page.wait_for_selector('[data-testid="user-audiobook-card"]', timeout=15_000)
+        except Exception:
+            print("  Warning: no library cards appeared within 15s.")
+
         showing_re = re.compile(r"Showing:\s*\d+-(\d+)\s*of\s*(\d+)", re.IGNORECASE)
+        clicks = 0
         for _ in range(50):
             try:
                 text = await page.locator("body").inner_text()
@@ -375,10 +391,13 @@ class ChirpDownloader:
             try:
                 if await load_more.count() == 0:
                     break
-                await load_more.first.scroll_into_view_if_needed(timeout=5_000)
-                await load_more.first.click(timeout=5_000)
+                await load_more.first.scroll_into_view_if_needed(timeout=10_000)
+                await load_more.first.click(timeout=10_000)
                 await page.wait_for_timeout(1_500)
-            except Exception:
+                clicks += 1
+                print(f"  Loading more of your library... ({clicks} click{'s' if clicks != 1 else ''} so far)")
+            except Exception as exc:
+                print(f"  Warning: \"Load More\" click failed, stopping there: {exc}")
                 break
         await page.evaluate("window.scrollTo(0, 0)")
         await page.wait_for_timeout(1000)

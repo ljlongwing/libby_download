@@ -54,6 +54,8 @@ If you don't want to install Python, you can download the "standalone" version f
 
 *Note: You may still need to install **FFmpeg** if you want the Libby tool to split the book into chapters (see below). The Chirp tool downloads each chapter as its own file already, so FFmpeg isn't needed for it.*
 
+**Your antivirus may flag the .exe as suspicious or run it sandboxed.** This is a known false positive for PyInstaller-built Python executables in general — they're unsigned, and their packed structure can resemble the packing techniques some malware uses to evade detection, even though there's nothing malicious in them. Running sandboxed shouldn't stop the tool from working, just slow it down; if it does cause problems, tell your antivirus to trust the file (or run it via Python instead — see Option 2 below, which doesn't trigger this since there's no compiled executable involved).
+
 ---
 
 ## 🛠️ Option 2: Run with Python (Advanced)
