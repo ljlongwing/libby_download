@@ -43,15 +43,15 @@
 
   <pre id="scanLog-{{ src.key }}" style="max-height: 400px; overflow-y: auto; background: #111; color: #ddd; padding: 1rem; margin-top: 1rem; font-size: 0.85rem;">{{ src.scan_log }}</pre>
 
-  <h3 style="margin-top: 1.5rem;">Current {{ 'Shelf' if src.key == 'libby' else 'Library' }}</h3>
-  {% if src.shelf %}
-  <table>
+  <h3 id="shelfHeading-{{ src.key }}" data-label="{{ 'Shelf' if src.key == 'libby' else 'Library' }}" style="margin-top: 1.5rem;">Current {{ 'Shelf' if src.key == 'libby' else 'Library' }} ({{ src.shelf|length }})</h3>
+  <table id="shelfTable-{{ src.key }}" {% if not src.shelf %}style="display:none;"{% endif %}>
     <thead>
-      <tr><th>Title</th><th>Author</th><th>Status</th><th>Downloaded</th><th></th></tr>
+      <tr><th>#</th><th>Title</th><th>Author</th><th>Status</th><th>Downloaded</th><th></th></tr>
     </thead>
-    <tbody>
+    <tbody id="shelfBody-{{ src.key }}">
       {% for b in src.shelf %}
       <tr>
+        <td>{{ loop.index }}</td>
         <td>{{ b.title }}</td>
         <td>{{ b.author }}</td>
         <td class="status-{{ b.status }}">{{ b.status }}{% if b.error %} ({{ b.error }}){% endif %}</td>
@@ -67,14 +67,91 @@
       {% endfor %}
     </tbody>
   </table>
-  {% else %}
-  <p>Nothing found as of the last scan{% if not src.last_scan %} (no scan has run yet){% endif %}.</p>
-  {% endif %}
+  <p id="shelfEmpty-{{ src.key }}" {% if src.shelf %}style="display:none;"{% endif %}>Nothing found as of the last scan{% if not src.last_scan %} (no scan has run yet){% endif %}.</p>
 </section>
 {% endfor %}
 
 <script>
 const pollingSources = new Set();
+
+// sync_shelf() runs at the very start of a scan, before any downloads
+// happen, so newly-found books show up in /scan/{source}/log's response
+// right away. Rebuild the shelf table from that on every poll tick instead
+// of waiting for the end-of-scan reload, so books found mid-scan (e.g.
+// several new ones on a Chirp library) show up without a manual refresh.
+function renderShelf(source, shelf, scanRunning) {
+  const heading = document.getElementById(`shelfHeading-${source}`);
+  if (heading) {
+    heading.textContent = `Current ${heading.dataset.label} (${shelf.length})`;
+  }
+
+  const table = document.getElementById(`shelfTable-${source}`);
+  const emptyMsg = document.getElementById(`shelfEmpty-${source}`);
+  const tbody = document.getElementById(`shelfBody-${source}`);
+  if (!tbody) return;
+
+  if (shelf.length === 0) {
+    if (table) table.style.display = 'none';
+    if (emptyMsg) emptyMsg.style.display = '';
+    return;
+  }
+  if (table) table.style.display = '';
+  if (emptyMsg) emptyMsg.style.display = 'none';
+
+  tbody.innerHTML = '';
+  shelf.forEach((b, i) => {
+    const tr = document.createElement('tr');
+
+    const numTd = document.createElement('td');
+    numTd.textContent = i + 1;
+    tr.appendChild(numTd);
+
+    const titleTd = document.createElement('td');
+    titleTd.textContent = b.title;
+    tr.appendChild(titleTd);
+
+    const authorTd = document.createElement('td');
+    authorTd.textContent = b.author;
+    tr.appendChild(authorTd);
+
+    const statusTd = document.createElement('td');
+    statusTd.className = `status-${b.status}`;
+    statusTd.textContent = b.status + (b.error ? ` (${b.error})` : '');
+    tr.appendChild(statusTd);
+
+    const dlTd = document.createElement('td');
+    if (b.downloaded_at) {
+      const t = document.createElement('time');
+      t.className = 'local-time';
+      t.setAttribute('datetime', b.downloaded_at);
+      const d = new Date(b.downloaded_at);
+      t.textContent = isNaN(d) ? b.downloaded_at : d.toLocaleString(undefined, {
+        year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+      });
+      dlTd.appendChild(t);
+    } else {
+      dlTd.textContent = '—';
+    }
+    tr.appendChild(dlTd);
+
+    const actionTd = document.createElement('td');
+    if (b.status === 'complete' || b.status === 'failed') {
+      const form = document.createElement('form');
+      form.method = 'post';
+      form.action = `/rebook/${source}/${encodeURIComponent(b.loan_id)}`;
+      form.style.margin = '0';
+      const rbtn = document.createElement('button');
+      rbtn.type = 'submit';
+      rbtn.textContent = 'Re-download';
+      rbtn.disabled = scanRunning;
+      form.appendChild(rbtn);
+      actionTd.appendChild(form);
+    }
+    tr.appendChild(actionTd);
+
+    tbody.appendChild(tr);
+  });
+}
 
 async function pollLog(source) {
   const resp = await fetch(`/scan/${source}/log`);
@@ -86,6 +163,8 @@ async function pollLog(source) {
   if (wasScrolledToBottom) {
     logEl.scrollTop = logEl.scrollHeight;
   }
+
+  renderShelf(source, data.shelf, data.running);
 
   const btn = document.getElementById(`scanBtn-${source}`);
 

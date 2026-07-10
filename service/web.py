@@ -83,6 +83,12 @@ async def scan_log(source: str):
         "last_result": worker.last_scan_result[source],
         "log": "\n".join(worker.scan_log[source]),
         "next_scan_at": worker.next_scan_at[source],
+        # sync_shelf() runs at the very start of a scan, before any
+        # downloads happen, so newly-found books are already in the DB
+        # while a scan is still in progress -- polled so the dashboard's
+        # shelf table can reflect that live instead of only on the
+        # page reload that happens once the whole scan finishes.
+        "shelf": db.list_shelf(source),
     }
 
 
