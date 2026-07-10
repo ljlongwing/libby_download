@@ -47,9 +47,21 @@
     <a href="{{ src.shelf_url }}" target="_blank" rel="noopener">Current {{ 'Shelf' if src.key == 'libby' else 'Library' }}</a>
     <span id="shelfCount-{{ src.key }}">({{ src.shelf|length }})</span>
   </h3>
+  <input
+    type="text" id="shelfFilter-{{ src.key }}" placeholder="Filter by title, author, or series&hellip;"
+    oninput="applyShelf('{{ src.key }}')"
+    style="margin-bottom: 0.5rem;{% if not src.shelf %} display:none;{% endif %}"
+  >
   <table id="shelfTable-{{ src.key }}" {% if not src.shelf %}style="display:none;"{% endif %}>
     <thead>
-      <tr><th>#</th><th>Title</th><th>Author</th><th>Series</th><th>Length</th><th>Status</th><th>Downloaded</th><th></th></tr>
+      <tr>
+        <th>#</th>
+        <th class="sortable" onclick="sortShelf('{{ src.key }}', 'title')">Title<span class="sort-arrow" id="sortArrow-{{ src.key }}-title"></span></th>
+        <th class="sortable" onclick="sortShelf('{{ src.key }}', 'author')">Author<span class="sort-arrow" id="sortArrow-{{ src.key }}-author"></span></th>
+        <th class="sortable" onclick="sortShelf('{{ src.key }}', 'series')">Series<span class="sort-arrow" id="sortArrow-{{ src.key }}-series"></span></th>
+        <th class="sortable" onclick="sortShelf('{{ src.key }}', 'length')">Length<span class="sort-arrow" id="sortArrow-{{ src.key }}-length"></span></th>
+        <th>Status</th><th>Downloaded</th><th></th>
+      </tr>
     </thead>
     <tbody id="shelfBody-{{ src.key }}">
       {% for b in src.shelf %}
@@ -79,15 +91,91 @@
 <script>
 const pollingSources = new Set();
 
+// Raw (unsorted, unfiltered) shelf data per source, seeded from the same
+// data the table was server-rendered from and kept in sync by pollLog().
+// Sorting/filtering only ever touches this local copy -- no round trip.
+const shelfData = {};
+const shelfState = {}; // source -> { sortCol, sortDir, running }
+{% for src in sources %}
+shelfData['{{ src.key }}'] = {{ src.shelf_json | safe }};
+shelfState['{{ src.key }}'] = { sortCol: null, sortDir: 1, running: {{ 'true' if src.scan_running else 'false' }} };
+{% endfor %}
+
+// Overdrive gives Libby "Xh Ym"/"Ym"; Chirp's scraped text is "Xh Ymin" --
+// both match on digits followed by an 'h' or 'm', so one parser covers
+// both. Returns -1 for blank/unparseable durations so they sort together
+// at one end rather than being scattered as 0.
+function parseDurationMinutes(text) {
+  if (!text) return -1;
+  const h = text.match(/(\d+)\s*h/i);
+  const m = text.match(/(\d+)\s*m/i);
+  if (!h && !m) return -1;
+  return (h ? parseInt(h[1], 10) * 60 : 0) + (m ? parseInt(m[1], 10) : 0);
+}
+
+function sortShelf(source, col) {
+  const state = shelfState[source];
+  if (state.sortCol === col) {
+    state.sortDir *= -1;
+  } else {
+    state.sortCol = col;
+    state.sortDir = 1;
+  }
+  applyShelf(source);
+}
+
+function applyShelf(source) {
+  const raw = shelfData[source] || [];
+  const filterEl = document.getElementById(`shelfFilter-${source}`);
+  const filterText = filterEl ? filterEl.value.trim().toLowerCase() : '';
+
+  let visible = raw;
+  if (filterText) {
+    visible = raw.filter(b =>
+      (b.title || '').toLowerCase().includes(filterText) ||
+      (b.author || '').toLowerCase().includes(filterText) ||
+      (b.series || '').toLowerCase().includes(filterText)
+    );
+  }
+
+  const state = shelfState[source];
+  ['title', 'author', 'series', 'length'].forEach(col => {
+    const arrow = document.getElementById(`sortArrow-${source}-${col}`);
+    if (arrow) arrow.textContent = state.sortCol === col ? (state.sortDir === 1 ? ' ▲' : ' ▼') : '';
+  });
+  if (state.sortCol) {
+    visible = [...visible].sort((a, b) => {
+      let av, bv;
+      if (state.sortCol === 'length') {
+        av = parseDurationMinutes(a.duration);
+        bv = parseDurationMinutes(b.duration);
+      } else if (state.sortCol === 'series') {
+        av = (a.series || '').toLowerCase();
+        bv = (b.series || '').toLowerCase();
+      } else {
+        av = (a[state.sortCol] || '').toLowerCase();
+        bv = (b[state.sortCol] || '').toLowerCase();
+      }
+      if (av < bv) return -1 * state.sortDir;
+      if (av > bv) return 1 * state.sortDir;
+      return 0;
+    });
+  }
+
+  renderShelf(source, visible, state.running, raw.length);
+
+  if (filterEl) filterEl.style.display = raw.length ? '' : 'none';
+}
+
 // sync_shelf() runs at the very start of a scan, before any downloads
 // happen, so newly-found books show up in /scan/{source}/log's response
 // right away. Rebuild the shelf table from that on every poll tick instead
 // of waiting for the end-of-scan reload, so books found mid-scan (e.g.
 // several new ones on a Chirp library) show up without a manual refresh.
-function renderShelf(source, shelf, scanRunning) {
+function renderShelf(source, shelf, scanRunning, rawCount) {
   const countEl = document.getElementById(`shelfCount-${source}`);
   if (countEl) {
-    countEl.textContent = `(${shelf.length})`;
+    countEl.textContent = shelf.length === rawCount ? `(${rawCount})` : `(${shelf.length} of ${rawCount})`;
   }
 
   const table = document.getElementById(`shelfTable-${source}`);
@@ -95,15 +183,30 @@ function renderShelf(source, shelf, scanRunning) {
   const tbody = document.getElementById(`shelfBody-${source}`);
   if (!tbody) return;
 
-  if (shelf.length === 0) {
+  // rawCount === 0 means the shelf/library itself is empty (show the
+  // "Nothing found" message); shelf.length === 0 with rawCount > 0 means a
+  // filter matched nothing (keep the table/headers, show a note in it
+  // instead -- "Nothing found" would wrongly imply the scan found nothing).
+  if (rawCount === 0) {
     if (table) table.style.display = 'none';
     if (emptyMsg) emptyMsg.style.display = '';
+    tbody.innerHTML = '';
     return;
   }
   if (table) table.style.display = '';
   if (emptyMsg) emptyMsg.style.display = 'none';
 
   tbody.innerHTML = '';
+  if (shelf.length === 0) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 8;
+    td.textContent = 'No books match your filter.';
+    td.style.color = '#666';
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+    return;
+  }
   shelf.forEach((b, i) => {
     const tr = document.createElement('tr');
 
@@ -186,7 +289,12 @@ async function pollLog(source) {
     logEl.scrollTop = logEl.scrollHeight;
   }
 
-  renderShelf(source, data.shelf, data.running);
+  // Route through applyShelf (not renderShelf directly) so an in-progress
+  // scan's live updates keep respecting whatever sort/filter is active
+  // instead of resetting the view on every 2s poll tick.
+  shelfData[source] = data.shelf;
+  shelfState[source].running = data.running;
+  applyShelf(source);
 
   const btn = document.getElementById(`scanBtn-${source}`);
 

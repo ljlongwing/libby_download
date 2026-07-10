@@ -5,6 +5,7 @@ scan loop per source on startup.
 """
 
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -54,6 +55,7 @@ def _source_or_404(source: str) -> str:
 async def dashboard(request: Request):
     panels = []
     for key, cfg in SOURCES.items():
+        shelf = db.list_shelf(key)
         panels.append({
             "key": key,
             "label": cfg["label"],
@@ -64,7 +66,13 @@ async def dashboard(request: Request):
             "next_scan_at": worker.next_scan_at[key],
             "scan_running": worker._scan_running[key],
             "scan_log": "\n".join(worker.scan_log[key]),
-            "shelf": db.list_shelf(key),
+            "shelf": shelf,
+            # Seeds the client-side sort/filter state with the same data
+            # the table was just rendered from, so sorting/filtering works
+            # immediately without an extra round trip on page load. Escapes
+            # "</" so a book title containing "</script>" can't break out
+            # of the inline <script> block it's embedded in.
+            "shelf_json": json.dumps(shelf).replace("</", "<\\/"),
         })
     return templates.TemplateResponse(request, "dashboard.html", {"sources": panels})
 
