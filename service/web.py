@@ -57,6 +57,7 @@ async def dashboard(request: Request):
         panels.append({
             "key": key,
             "label": cfg["label"],
+            "shelf_url": cfg["shelf_url"],
             "authenticated": cfg["session_file"].exists(),
             "last_scan": worker.last_scan_result[key],
             "last_scan_at": worker.last_scan_at[key],

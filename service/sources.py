@@ -22,6 +22,8 @@ SOURCES = {
         "downloader_cls": libby_dl.LibbyDownloader,
         "session_file": libby_dl.SESSION_FILE,
         "login_url": libby_dl.LIBBY_URL,
+        # Where the dashboard's "Current Shelf" heading links out to.
+        "shelf_url": libby_dl.LIBBY_URL + "/shelf",
         # Libby's shelf API gives a stable numeric loan id.
         "get_loan_id": lambda book: book.get("id", ""),
         "get_card_id": lambda book: book.get("card_id", ""),
@@ -36,6 +38,8 @@ SOURCES = {
         # own _ensure_authenticated() explicitly appends /library for the
         # same reason.
         "login_url": chirp_dl.CHIRP_URL + "/library",
+        # Where the dashboard's "Current Library" heading links out to.
+        "shelf_url": chirp_dl.CHIRP_URL + "/library",
         # Chirp's shelf has no numeric id; the player href (e.g.
         # "/player/34151152") is the closest stable, unique identifier.
         "get_loan_id": lambda book: book.get("href", ""),

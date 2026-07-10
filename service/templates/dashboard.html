@@ -43,7 +43,10 @@
 
   <pre id="scanLog-{{ src.key }}" style="max-height: 400px; overflow-y: auto; background: #111; color: #ddd; padding: 1rem; margin-top: 1rem; font-size: 0.85rem;">{{ src.scan_log }}</pre>
 
-  <h3 id="shelfHeading-{{ src.key }}" data-label="{{ 'Shelf' if src.key == 'libby' else 'Library' }}" style="margin-top: 1.5rem;">Current {{ 'Shelf' if src.key == 'libby' else 'Library' }} ({{ src.shelf|length }})</h3>
+  <h3 style="margin-top: 1.5rem;">
+    <a href="{{ src.shelf_url }}" target="_blank" rel="noopener">Current {{ 'Shelf' if src.key == 'libby' else 'Library' }}</a>
+    <span id="shelfCount-{{ src.key }}">({{ src.shelf|length }})</span>
+  </h3>
   <table id="shelfTable-{{ src.key }}" {% if not src.shelf %}style="display:none;"{% endif %}>
     <thead>
       <tr><th>#</th><th>Title</th><th>Author</th><th>Series</th><th>Length</th><th>Status</th><th>Downloaded</th><th></th></tr>
@@ -82,9 +85,9 @@ const pollingSources = new Set();
 // of waiting for the end-of-scan reload, so books found mid-scan (e.g.
 // several new ones on a Chirp library) show up without a manual refresh.
 function renderShelf(source, shelf, scanRunning) {
-  const heading = document.getElementById(`shelfHeading-${source}`);
-  if (heading) {
-    heading.textContent = `Current ${heading.dataset.label} (${shelf.length})`;
+  const countEl = document.getElementById(`shelfCount-${source}`);
+  if (countEl) {
+    countEl.textContent = `(${shelf.length})`;
   }
 
   const table = document.getElementById(`shelfTable-${source}`);
