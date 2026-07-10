@@ -9,7 +9,7 @@
     {% for b in books %}
     <tr>
       <td>{{ b.source_label }}</td>
-      <td>{{ b.title }}</td>
+      <td>{% if b.detail_url %}<a href="{{ b.detail_url }}" target="_blank" rel="noopener">{{ b.title }}</a>{% else %}{{ b.title }}{% endif %}</td>
       <td>{{ b.author }}</td>
       <td>{% if b.series %}{{ b.series }}{% if b.series_index %} #{{ b.series_index }}{% endif %}{% else %}&mdash;{% endif %}</td>
       <td>{{ b.duration or '—' }}</td>

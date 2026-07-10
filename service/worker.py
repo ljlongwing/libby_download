@@ -168,6 +168,7 @@ async def scan_once(source: str) -> dict:
                                     "series": b.get("series"),
                                     "series_index": b.get("series_index"),
                                     "duration": b.get("duration"),
+                                    "detail_url": b.get("detail_url", ""),
                                 }
                                 for b in books
                             ])

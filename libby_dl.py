@@ -435,8 +435,9 @@ class LibbyDownloader:
                     media_type = (loan.get("type") or {}).get("id", "")
                     if media_type and media_type != "audiobook":
                         continue  # skip non-audiobooks only when type is known
+                    loan_id = str(loan.get("id") or loan.get("titleId") or "")
                     api_loans.append({
-                        "id": str(loan.get("id") or loan.get("titleId") or ""),
+                        "id": loan_id,
                         "card_id": str(loan.get("cardId") or loan.get("websiteId") or ""),
                         "title": loan.get("title", ""),
                         "author": loan.get("firstCreatorName", ""),
@@ -446,6 +447,12 @@ class LibbyDownloader:
                         # _get_series_metadata() look up series/runtime info
                         # from Overdrive's public catalog API afterward.
                         "reserve_id": str(loan.get("reserveId") or ""),
+                        # Libby's own "Title details" page -- confirmed live
+                        # to be a real, working URL built purely from the
+                        # loan id, distinct from the player.
+                        "detail_url": (
+                            f"{LIBBY_URL}/shelf/similar-{loan_id}/page-1/{loan_id}" if loan_id else ""
+                        ),
                     })
             except Exception:
                 pass

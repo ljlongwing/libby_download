@@ -396,8 +396,9 @@ class ChirpDownloader:
                             cover_url: img ? img.src : null,
                             // The book's own /audiobooks/<slug> page, not
                             // the /player/<id> URL above -- used to look up
-                            // series/run time, which the player never shows.
-                            detail_url: titleLink ? titleLink.getAttribute('href') : null,
+                            // series/run time, which the player never shows,
+                            // and linked from the dashboard's shelf table.
+                            detail_url: titleLink ? (window.location.origin + titleLink.getAttribute('href')) : null,
                         });
                     }
                 });

@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS books (
     series TEXT,            -- NULL = not yet looked up; '' = looked up, not part of a series
     series_index TEXT,
     duration TEXT,
+    detail_url TEXT,        -- link to the book's page on the source's own site
     PRIMARY KEY (source, loan_id)
 );
 
@@ -76,7 +77,7 @@ def init_db() -> None:
             pass  # column already exists
         # Additive migration for installs from before series/duration lookup
         # existed.
-        for col in ("series TEXT", "series_index TEXT", "duration TEXT"):
+        for col in ("series TEXT", "series_index TEXT", "duration TEXT", "detail_url TEXT"):
             try:
                 conn.execute(f"ALTER TABLE books ADD COLUMN {col}")
             except sqlite3.OperationalError:
@@ -170,7 +171,9 @@ def sync_shelf(source: str, books: list[dict]) -> None:
     series/series_index/duration are only written when the caller actually
     looked them up this cycle (worker.py skips re-fetching for books that
     already have them) -- COALESCE keeps whatever was already stored
-    instead of blanking it out on every ordinary sync.
+    instead of blanking it out on every ordinary sync. detail_url is cheap
+    to recompute every time (no extra lookup, same as title/author) so it's
+    always overwritten fresh.
     """
     now = datetime.now(timezone.utc).isoformat()
     seen_ids = [b["loan_id"] for b in books if b.get("loan_id")]
@@ -184,12 +187,12 @@ def sync_shelf(source: str, books: list[dict]) -> None:
             ).fetchone()
             if existing:
                 conn.execute(
-                    "UPDATE books SET on_shelf = 1, title = ?, author = ?, card_id = ?, "
+                    "UPDATE books SET on_shelf = 1, title = ?, author = ?, card_id = ?, detail_url = ?, "
                     "series = COALESCE(?, series), series_index = COALESCE(?, series_index), "
                     "duration = COALESCE(?, duration) "
                     "WHERE source = ? AND loan_id = ?",
                     (
-                        b.get("title", ""), b.get("author", ""), b.get("card_id", ""),
+                        b.get("title", ""), b.get("author", ""), b.get("card_id", ""), b.get("detail_url", ""),
                         b.get("series"), b.get("series_index"), b.get("duration"),
                         source, loan_id,
                     ),
@@ -198,11 +201,11 @@ def sync_shelf(source: str, books: list[dict]) -> None:
                 conn.execute(
                     "INSERT INTO books "
                     "(source, loan_id, card_id, title, author, status, first_seen_at, on_shelf, "
-                    " series, series_index, duration) "
-                    "VALUES (?, ?, ?, ?, ?, 'pending', ?, 1, ?, ?, ?)",
+                    " series, series_index, duration, detail_url) "
+                    "VALUES (?, ?, ?, ?, ?, 'pending', ?, 1, ?, ?, ?, ?)",
                     (
                         source, loan_id, b.get("card_id", ""), b.get("title", ""), b.get("author", ""), now,
-                        b.get("series"), b.get("series_index"), b.get("duration"),
+                        b.get("series"), b.get("series_index"), b.get("duration"), b.get("detail_url", ""),
                     ),
                 )
         if seen_ids:

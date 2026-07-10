@@ -52,7 +52,7 @@
       {% for b in src.shelf %}
       <tr>
         <td>{{ loop.index }}</td>
-        <td>{{ b.title }}</td>
+        <td>{% if b.detail_url %}<a href="{{ b.detail_url }}" target="_blank" rel="noopener">{{ b.title }}</a>{% else %}{{ b.title }}{% endif %}</td>
         <td>{{ b.author }}</td>
         <td>{% if b.series %}{{ b.series }}{% if b.series_index %} #{{ b.series_index }}{% endif %}{% else %}&mdash;{% endif %}</td>
         <td>{{ b.duration or '—' }}</td>
@@ -109,7 +109,16 @@ function renderShelf(source, shelf, scanRunning) {
     tr.appendChild(numTd);
 
     const titleTd = document.createElement('td');
-    titleTd.textContent = b.title;
+    if (b.detail_url) {
+      const a = document.createElement('a');
+      a.href = b.detail_url;
+      a.target = '_blank';
+      a.rel = 'noopener';
+      a.textContent = b.title;
+      titleTd.appendChild(a);
+    } else {
+      titleTd.textContent = b.title;
+    }
     tr.appendChild(titleTd);
 
     const authorTd = document.createElement('td');
