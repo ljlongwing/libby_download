@@ -394,6 +394,10 @@ class ChirpDownloader:
                             author,
                             href,
                             cover_url: img ? img.src : null,
+                            // The book's own /audiobooks/<slug> page, not
+                            // the /player/<id> URL above -- used to look up
+                            // series/run time, which the player never shows.
+                            detail_url: titleLink ? titleLink.getAttribute('href') : null,
                         });
                     }
                 });
@@ -407,6 +411,40 @@ class ChirpDownloader:
             print(f"  Debug: Found {link_count} links on the page but no library cards matched.")
 
         return sorted(books, key=lambda b: b["title"].lower())
+
+    async def _get_series_metadata(self, page: Page, book: dict) -> dict:
+        """Best-effort lookup of series name/position and total run time.
+
+        Chirp's shelf/library GraphQL queries don't request either field,
+        and there's no public catalog API like Overdrive's -- but the
+        book's own /audiobooks/<slug> detail page (confirmed live) shows
+        both as plain visible text ("Book #4 from the series: <name>",
+        "Run Time" / "33h 5min"), so this navigates there and scrapes it.
+        Failure just means these fields stay blank -- supplementary
+        metadata, not essential to the download. Reuses the shared `page`
+        since this always runs before any download navigation begins.
+        """
+        detail_url = book.get("detail_url") or ""
+        if not detail_url:
+            return {}
+        url = detail_url if detail_url.startswith("http") else CHIRP_URL + detail_url
+        try:
+            await page.goto(url, wait_until="load", timeout=30_000)
+            await page.wait_for_timeout(2_000)
+            text = await page.locator("body").inner_text()
+        except Exception:
+            return {}
+
+        lines = [line.strip() for line in text.split("\n") if line.strip()]
+        result = {"series": "", "series_index": "", "duration": ""}
+        for i, line in enumerate(lines):
+            m = re.match(r"Book #([\d.]+) from the series:", line, re.IGNORECASE)
+            if m and i + 1 < len(lines):
+                result["series_index"] = m.group(1)
+                result["series"] = lines[i + 1]
+            elif line.lower() == "run time" and i + 1 < len(lines):
+                result["duration"] = lines[i + 1]
+        return result
 
     def _prompt_selection(self, books: list[dict]) -> Optional[dict]:
         print(f"\nFound {len(books)} item(s) in your library:\n")

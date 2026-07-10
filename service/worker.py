@@ -141,12 +141,33 @@ async def scan_once(source: str) -> dict:
                             session_expired = True
                         else:
                             books = await downloader._get_shelf(page)
+
+                            # Series/duration is effectively static once a
+                            # title is known, so only look it up for books
+                            # that don't already have an answer on record --
+                            # otherwise every scan would re-fetch it for the
+                            # whole shelf/library every time.
+                            already_known = db.get_series_lookup_status(source)
+                            for book in books:
+                                loan_id = cfg["get_loan_id"](book)
+                                if not loan_id or loan_id in already_known:
+                                    continue
+                                try:
+                                    book.update(await downloader._get_series_metadata(page, book))
+                                except Exception:
+                                    logger.warning(
+                                        "[%s] Series metadata lookup failed for %r", source, book.get("title")
+                                    )
+
                             db.sync_shelf(source, [
                                 {
                                     "loan_id": cfg["get_loan_id"](b),
                                     "title": b.get("title", ""),
                                     "author": b.get("author", ""),
                                     "card_id": cfg["get_card_id"](b),
+                                    "series": b.get("series"),
+                                    "series_index": b.get("series_index"),
+                                    "duration": b.get("duration"),
                                 }
                                 for b in books
                             ])

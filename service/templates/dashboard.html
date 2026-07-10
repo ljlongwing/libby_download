@@ -46,7 +46,7 @@
   <h3 id="shelfHeading-{{ src.key }}" data-label="{{ 'Shelf' if src.key == 'libby' else 'Library' }}" style="margin-top: 1.5rem;">Current {{ 'Shelf' if src.key == 'libby' else 'Library' }} ({{ src.shelf|length }})</h3>
   <table id="shelfTable-{{ src.key }}" {% if not src.shelf %}style="display:none;"{% endif %}>
     <thead>
-      <tr><th>#</th><th>Title</th><th>Author</th><th>Status</th><th>Downloaded</th><th></th></tr>
+      <tr><th>#</th><th>Title</th><th>Author</th><th>Series</th><th>Length</th><th>Status</th><th>Downloaded</th><th></th></tr>
     </thead>
     <tbody id="shelfBody-{{ src.key }}">
       {% for b in src.shelf %}
@@ -54,6 +54,8 @@
         <td>{{ loop.index }}</td>
         <td>{{ b.title }}</td>
         <td>{{ b.author }}</td>
+        <td>{% if b.series %}{{ b.series }}{% if b.series_index %} #{{ b.series_index }}{% endif %}{% else %}&mdash;{% endif %}</td>
+        <td>{{ b.duration or '—' }}</td>
         <td class="status-{{ b.status }}">{{ b.status }}{% if b.error %} ({{ b.error }}){% endif %}</td>
         <td>{% if b.downloaded_at %}<time class="local-time" datetime="{{ b.downloaded_at }}">{{ b.downloaded_at }}</time>{% else %}&mdash;{% endif %}</td>
         <td>
@@ -113,6 +115,14 @@ function renderShelf(source, shelf, scanRunning) {
     const authorTd = document.createElement('td');
     authorTd.textContent = b.author;
     tr.appendChild(authorTd);
+
+    const seriesTd = document.createElement('td');
+    seriesTd.textContent = b.series ? `${b.series}${b.series_index ? ' #' + b.series_index : ''}` : '—';
+    tr.appendChild(seriesTd);
+
+    const lengthTd = document.createElement('td');
+    lengthTd.textContent = b.duration || '—';
+    tr.appendChild(lengthTd);
 
     const statusTd = document.createElement('td');
     statusTd.className = `status-${b.status}`;

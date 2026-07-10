@@ -33,6 +33,9 @@ CREATE TABLE IF NOT EXISTS books (
     first_seen_at TEXT NOT NULL,
     downloaded_at TEXT,
     on_shelf INTEGER NOT NULL DEFAULT 0,   -- 1 if seen on the shelf/library in the most recent scan
+    series TEXT,            -- NULL = not yet looked up; '' = looked up, not part of a series
+    series_index TEXT,
+    duration TEXT,
     PRIMARY KEY (source, loan_id)
 );
 
@@ -71,6 +74,13 @@ def init_db() -> None:
             conn.execute("ALTER TABLE books ADD COLUMN on_shelf INTEGER NOT NULL DEFAULT 0")
         except sqlite3.OperationalError:
             pass  # column already exists
+        # Additive migration for installs from before series/duration lookup
+        # existed.
+        for col in ("series TEXT", "series_index TEXT", "duration TEXT"):
+            try:
+                conn.execute(f"ALTER TABLE books ADD COLUMN {col}")
+            except sqlite3.OperationalError:
+                pass  # column already exists
         # Additive migration for installs from before scan_interval_minutes
         # was split per-source: seed both new keys from the old single one.
         old = conn.execute(
@@ -156,6 +166,11 @@ def sync_shelf(source: str, books: list[dict]) -> None:
     this source) that's no longer present (returned/expired). Called at the
     start of every scan so the dashboard can show "what's available right
     now" independent of download history.
+
+    series/series_index/duration are only written when the caller actually
+    looked them up this cycle (worker.py skips re-fetching for books that
+    already have them) -- COALESCE keeps whatever was already stored
+    instead of blanking it out on every ordinary sync.
     """
     now = datetime.now(timezone.utc).isoformat()
     seen_ids = [b["loan_id"] for b in books if b.get("loan_id")]
@@ -169,15 +184,26 @@ def sync_shelf(source: str, books: list[dict]) -> None:
             ).fetchone()
             if existing:
                 conn.execute(
-                    "UPDATE books SET on_shelf = 1, title = ?, author = ?, card_id = ? "
+                    "UPDATE books SET on_shelf = 1, title = ?, author = ?, card_id = ?, "
+                    "series = COALESCE(?, series), series_index = COALESCE(?, series_index), "
+                    "duration = COALESCE(?, duration) "
                     "WHERE source = ? AND loan_id = ?",
-                    (b.get("title", ""), b.get("author", ""), b.get("card_id", ""), source, loan_id),
+                    (
+                        b.get("title", ""), b.get("author", ""), b.get("card_id", ""),
+                        b.get("series"), b.get("series_index"), b.get("duration"),
+                        source, loan_id,
+                    ),
                 )
             else:
                 conn.execute(
-                    "INSERT INTO books (source, loan_id, card_id, title, author, status, first_seen_at, on_shelf) "
-                    "VALUES (?, ?, ?, ?, ?, 'pending', ?, 1)",
-                    (source, loan_id, b.get("card_id", ""), b.get("title", ""), b.get("author", ""), now),
+                    "INSERT INTO books "
+                    "(source, loan_id, card_id, title, author, status, first_seen_at, on_shelf, "
+                    " series, series_index, duration) "
+                    "VALUES (?, ?, ?, ?, ?, 'pending', ?, 1, ?, ?, ?)",
+                    (
+                        source, loan_id, b.get("card_id", ""), b.get("title", ""), b.get("author", ""), now,
+                        b.get("series"), b.get("series_index"), b.get("duration"),
+                    ),
                 )
         if seen_ids:
             placeholders = ",".join("?" * len(seen_ids))
@@ -187,6 +213,20 @@ def sync_shelf(source: str, books: list[dict]) -> None:
             )
         else:
             conn.execute("UPDATE books SET on_shelf = 0 WHERE source = ?", (source,))
+
+
+def get_series_lookup_status(source: str) -> set[str]:
+    """loan_ids (for this source, regardless of current on_shelf status)
+    that already have a series lookup on record -- series is NULL only
+    when it's never been looked up; '' means it was checked and the book
+    just isn't part of one. Lets worker.py skip re-fetching for books it
+    already has an answer for, on-shelf or not.
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT loan_id FROM books WHERE source = ? AND series IS NOT NULL", (source,)
+        ).fetchall()
+        return {r["loan_id"] for r in rows}
 
 
 def list_shelf(source: str) -> list[dict]:

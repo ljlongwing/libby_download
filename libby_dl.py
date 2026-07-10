@@ -442,6 +442,10 @@ class LibbyDownloader:
                         "author": loan.get("firstCreatorName", ""),
                         "href": None,
                         "cover_url": _cover_url_from_covers(loan.get("covers")),
+                        # Not used for the download itself -- lets
+                        # _get_series_metadata() look up series/runtime info
+                        # from Overdrive's public catalog API afterward.
+                        "reserve_id": str(loan.get("reserveId") or ""),
                     })
             except Exception:
                 pass
@@ -550,6 +554,46 @@ class LibbyDownloader:
             books = []
 
         return sorted(books, key=lambda b: b.get("title", "").lower())
+
+    async def _get_series_metadata(self, page: Page, book: dict) -> dict:
+        """Best-effort lookup of series name/position and total run time.
+
+        Not present in the shelf-sync payload itself, only per-title -- but
+        Overdrive's catalog API (the same one thunder.api.overdrive.com
+        calls the page already makes while browsing) exposes it publicly,
+        keyed by the loan's reserveId, with no auth required. `page` is
+        accepted for signature parity with ChirpDownloader (which needs it
+        to navigate a detail page) but unused here since this is a plain
+        HTTP lookup. Failure just means these fields stay blank --
+        supplementary metadata, not essential to the download.
+        """
+        reserve_id = book.get("reserve_id", "")
+        if not reserve_id:
+            return {}
+        try:
+            resp = requests.get(
+                f"https://thunder.api.overdrive.com/v2/media/{reserve_id}",
+                params={"x-client-id": "dewey"},
+                timeout=10,
+            )
+            if resp.status_code != 200:
+                return {}
+            data = resp.json()
+        except Exception:
+            return {}
+
+        result = {"series": "", "series_index": "", "duration": ""}
+        detailed_series = data.get("detailedSeries") or {}
+        if detailed_series.get("seriesName"):
+            result["series"] = detailed_series["seriesName"]
+            result["series_index"] = str(detailed_series.get("readingOrder") or "")
+
+        for fmt in data.get("formats", []):
+            dur = fmt.get("duration")
+            if dur:
+                result["duration"] = _format_hms_duration(dur)
+                break
+        return result
 
     def _prompt_selection(self, books: list[dict]) -> Optional[dict]:
         print(f"\nFound {len(books)} item(s) on your shelf:\n")
@@ -2461,6 +2505,22 @@ def _fmt_hms(seconds: float) -> str:
     h, rem = divmod(s, 3600)
     m, s = divmod(rem, 60)
     return f"{h}:{m:02d}:{s:02d}"
+
+
+def _format_hms_duration(hms: str) -> str:
+    """Format an Overdrive "H:MM:SS" (or "MM:SS") duration string as a
+    short human-readable "Xh Ym" / "Ym" -- returned as-is if unparseable."""
+    try:
+        parts = [int(p) for p in hms.split(":")]
+    except ValueError:
+        return hms
+    if len(parts) == 3:
+        h, m, _s = parts
+    elif len(parts) == 2:
+        h, m = 0, parts[0]
+    else:
+        return hms
+    return f"{h}h {m}m" if h else f"{m}m"
 
 
 def _part_number(filename: str) -> int:

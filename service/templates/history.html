@@ -3,7 +3,7 @@
 <h1>History</h1>
 <table>
   <thead>
-    <tr><th>Source</th><th>Title</th><th>Author</th><th>Status</th><th>First Seen</th><th>Downloaded</th><th>Output</th></tr>
+    <tr><th>Source</th><th>Title</th><th>Author</th><th>Series</th><th>Length</th><th>Status</th><th>First Seen</th><th>Downloaded</th><th>Output</th></tr>
   </thead>
   <tbody>
     {% for b in books %}
@@ -11,13 +11,15 @@
       <td>{{ b.source_label }}</td>
       <td>{{ b.title }}</td>
       <td>{{ b.author }}</td>
+      <td>{% if b.series %}{{ b.series }}{% if b.series_index %} #{{ b.series_index }}{% endif %}{% else %}&mdash;{% endif %}</td>
+      <td>{{ b.duration or '—' }}</td>
       <td class="status-{{ b.status }}">{{ b.status }}{% if b.error %} ({{ b.error }}){% endif %}</td>
       <td><time class="local-time" datetime="{{ b.first_seen_at }}">{{ b.first_seen_at }}</time></td>
       <td>{% if b.downloaded_at %}<time class="local-time" datetime="{{ b.downloaded_at }}">{{ b.downloaded_at }}</time>{% endif %}</td>
       <td>{{ b.output_path or '' }}</td>
     </tr>
     {% else %}
-    <tr><td colspan="7">No books yet.</td></tr>
+    <tr><td colspan="9">No books yet.</td></tr>
     {% endfor %}
   </tbody>
 </table>
