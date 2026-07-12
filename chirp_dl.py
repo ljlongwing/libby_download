@@ -270,13 +270,14 @@ class ChirpDownloader:
             print(f"Authenticated at {page.url}")
             return
 
-        # Fallback to /my-library
-        if "/library" not in page.url:
-            await page.goto(CHIRP_URL + "/my-library", wait_until="load", timeout=60_000)
-
-        if await self._is_logged_in(page):
-            print(f"Authenticated at {page.url}")
-            return
+        # Confirmed live: /my-library is not a real route (404s regardless
+        # of login state) -- this used to "fall back" to it whenever
+        # /library redirected elsewhere, which is exactly what happens for
+        # a logged-out visit (redirects to /users/sign_in, a real, working
+        # sign-in page). That sent every logged-out run straight from a
+        # working sign-in page to a broken 404, which is what both a
+        # tester and a live repro here hit. Removed -- there's nothing to
+        # fall back to; wherever /library actually landed is correct.
 
         if not self.headless:
             print(
