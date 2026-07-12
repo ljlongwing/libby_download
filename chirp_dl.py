@@ -251,9 +251,21 @@ class ChirpDownloader:
     # ------------------------------------------------------------------
 
     async def _ensure_authenticated(self, page: Page, context: BrowserContext) -> None:
-        # Prioritize /library as requested by user
-        await page.goto(CHIRP_URL + "/library", wait_until="load", timeout=60_000)
-        
+        # Warm up at the site root before jumping to a deep route like
+        # /library. A tester with no saved session hit a 404 going straight
+        # there -- not reproduced here (the same navigation cleanly
+        # redirected to /users/sign_in in testing), so it's likely
+        # environment-specific (network/antivirus interference), but the
+        # home page is a much safer bet to land somewhere real regardless,
+        # and has its own visible "Sign In" link either way.
+        resp = await page.goto(CHIRP_URL, wait_until="load", timeout=60_000)
+        if resp is not None and resp.status >= 400:
+            print(f"  Warning: chirpbooks.com returned HTTP {resp.status} loading the home page.")
+
+        resp = await page.goto(CHIRP_URL + "/library", wait_until="load", timeout=60_000)
+        if resp is not None and resp.status >= 400:
+            print(f"  Warning: chirpbooks.com returned HTTP {resp.status} loading /library.")
+
         if await self._is_logged_in(page):
             print(f"Authenticated at {page.url}")
             return
