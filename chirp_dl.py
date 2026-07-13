@@ -164,10 +164,40 @@ class ChirpDownloader:
             ctx_kwargs["storage_state"] = str(SESSION_FILE)
 
         context = await browser.new_context(**ctx_kwargs)
-        # Hide the navigator.webdriver flag
-        await context.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-        )
+        # Patch a handful of automation tells that a real Chrome/Brave
+        # profile doesn't have -- Chirp's sign-in page runs bot-detection
+        # scoring (BookBub's "mockingjay" tracking, visible in its own
+        # network payloads) that flagged a bare Playwright context in the
+        # high-90s/100 even on a real installed browser, well before any
+        # form interaction happened, which points at fingerprinting rather
+        # than behavioral (typing/click) signals. addInitScript runs before
+        # any page script, including in iframes, so a site's "recheck
+        # inside a fresh iframe" detection trick doesn't just see the
+        # unpatched default either.
+        await context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+
+            // Real Chrome/Brave always has window.chrome.runtime, even
+            // with zero extensions installed; a bare CDP-launched context
+            // doesn't unless something adds it.
+            if (!window.chrome) { window.chrome = {}; }
+            if (!window.chrome.runtime) { window.chrome.runtime = {}; }
+
+            // navigator.languages defaults to a single-entry array under
+            // Playwright; real browsers normally report a full preference
+            // list.
+            Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+
+            // Permissions.query('notifications') reports 'denied' under
+            // automation regardless of the page's actual notification
+            // permission state, a known mismatch real browsers don't have.
+            const origQuery = window.navigator.permissions.query;
+            window.navigator.permissions.query = (params) => (
+                params && params.name === 'notifications'
+                    ? Promise.resolve({ state: Notification.permission })
+                    : origQuery(params)
+            );
+        """)
         page = await context.new_page()
 
         # Intercept each chapter's audio request as it fires. Registered
@@ -250,6 +280,38 @@ class ChirpDownloader:
     # Authentication
     # ------------------------------------------------------------------
 
+    async def _goto_library_with_retry(self, page: Page, attempts: int = 3) -> None:
+        """Navigate to /library, retrying on failure.
+
+        A live repro found /library can hang indefinitely (a stuck
+        pending GET, captured via a browser's own network inspector)
+        specifically right after a fresh login completes, while the exact
+        same navigation works fine once a session is already established
+        (used throughout this class without issue otherwise). A real
+        (non-automated) login lands on /home, not /library -- confirmed
+        via a captured HAR -- so /library is always a follow-up
+        navigation, never where a fresh login itself lands. That pattern
+        (works once settled, occasionally hangs immediately after a
+        write) smells like a transient server-side race on Chirp's end
+        rather than anything wrong with the request itself, so this
+        retries with a short backoff instead of hanging forever or
+        crashing the whole run on one bad attempt.
+        """
+        last_exc: Optional[Exception] = None
+        for attempt in range(attempts):
+            try:
+                resp = await page.goto(CHIRP_URL + "/library", wait_until="load", timeout=20_000)
+                if resp is not None and resp.status >= 400:
+                    print(f"  Warning: chirpbooks.com returned HTTP {resp.status} loading /library.")
+                last_exc = None
+                break
+            except Exception as exc:
+                last_exc = exc
+                print(f"  Warning: /library didn't load (attempt {attempt + 1}/{attempts}): {exc}")
+                await page.wait_for_timeout(3_000)
+        if last_exc is not None:
+            print(f"  /library still not responding after {attempts} attempts -- continuing anyway.")
+
     async def _ensure_authenticated(self, page: Page, context: BrowserContext) -> None:
         # Warm up at the site root before jumping to a deep route like
         # /library. A tester with no saved session hit a 404 going straight
@@ -262,9 +324,7 @@ class ChirpDownloader:
         if resp is not None and resp.status >= 400:
             print(f"  Warning: chirpbooks.com returned HTTP {resp.status} loading the home page.")
 
-        resp = await page.goto(CHIRP_URL + "/library", wait_until="load", timeout=60_000)
-        if resp is not None and resp.status >= 400:
-            print(f"  Warning: chirpbooks.com returned HTTP {resp.status} loading /library.")
+        await self._goto_library_with_retry(page)
 
         if await self._is_logged_in(page):
             print(f"Authenticated at {page.url}")
@@ -356,9 +416,12 @@ class ChirpDownloader:
     async def _get_shelf(self, page: Page) -> list[dict]:
         print(f"Loading library from {page.url}...")
 
-        # Ensure we are on a library page
+        # Ensure we are on a library page. A successful login lands on
+        # /home, not /library (confirmed via a captured HAR of a real
+        # login), so this navigation runs on essentially every fresh-login
+        # run -- see _goto_library_with_retry for why it retries.
         if "library" not in page.url.lower():
-            await page.goto(CHIRP_URL + "/library", wait_until="load")
+            await self._goto_library_with_retry(page)
 
         # Chirp paginates library cards behind a "Load More" button (~15-20
         # cards per batch), not infinite scroll -- confirmed live: scrolling
