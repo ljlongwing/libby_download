@@ -36,7 +36,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import requests
 from mutagen.id3 import APIC, COMM, TALB, TIT2, TIT3, TPE1, TPE2, TYER, TRCK, ID3
@@ -109,15 +109,27 @@ class LibbyDownloader:
                     print("No audiobooks found on your shelf.")
                     return
 
-                book = self._prompt_selection(books)
-                if not book:
+                selection = self._prompt_selection(books)
+                if not selection:
                     return
 
-                try:
-                    await self._download_selected_book(page, context, player_page, book)
-                except RuntimeError as e:
-                    print(f"\n{e}")
-                    return
+                if selection == "all":
+                    downloaded = failed = 0
+                    for i, book in enumerate(books, 1):
+                        print(f"\n{'=' * 60}\n  Book {i}/{len(books)}: {book['title']}\n{'=' * 60}")
+                        try:
+                            await self._download_selected_book(page, context, player_page, book)
+                            downloaded += 1
+                        except RuntimeError as e:
+                            print(f"\n{e}")
+                            failed += 1
+                    print(f"\nDone: {downloaded} downloaded, {failed} failed.")
+                else:
+                    try:
+                        await self._download_selected_book(page, context, player_page, selection)
+                    except RuntimeError as e:
+                        print(f"\n{e}")
+                        return
 
             finally:
                 # Always persist the session (including IndexedDB where Libby
@@ -611,7 +623,9 @@ class LibbyDownloader:
                 break
         return result
 
-    def _prompt_selection(self, books: list[dict]) -> Optional[dict]:
+    def _prompt_selection(self, books: list[dict]) -> Optional[Union[dict, str]]:
+        """Returns a single book dict, the literal string "all" (download
+        every book on the shelf), or None (quit)."""
         print(f"\nFound {len(books)} item(s) on your shelf:\n")
         for i, b in enumerate(books, 1):
             suffix = f"  –  {b['author']}" if b["author"] else ""
@@ -619,16 +633,18 @@ class LibbyDownloader:
         print()
 
         while True:
-            raw = input(f"Select [1-{len(books)}] or q to quit: ").strip()
+            raw = input(f"Select [1-{len(books)}], 'a' for all, or q to quit: ").strip()
             if raw.lower() == "q":
                 return None
+            if raw.lower() == "a":
+                return "all"
             try:
                 idx = int(raw) - 1
                 if 0 <= idx < len(books):
                     return books[idx]
             except ValueError:
                 pass
-            print(f"  Enter a number between 1 and {len(books)}.")
+            print(f"  Enter a number between 1 and {len(books)}, 'a' for all, or q to quit.")
 
     # ------------------------------------------------------------------
     # Player navigation
