@@ -354,7 +354,15 @@ class ChirpDownloader:
             )
 
         try:
-            input(">>> Press Enter when logged in and on the My Library page: ")
+            # asyncio.to_thread, not a bare input() call: input() blocks
+            # the whole event loop, and Playwright needs that loop running
+            # to service the browser (including finishing up whatever
+            # network request happens to be in flight the moment you
+            # actually log in). A bare input() here was the real cause of
+            # "the page just spins forever" reports -- confirmed live: F12
+            # showed /library stuck pending while the script sat on this
+            # exact prompt, and it resolved the instant Enter was pressed.
+            await asyncio.to_thread(input, ">>> Press Enter when logged in and on the My Library page: ")
         except EOFError:
             pass
 

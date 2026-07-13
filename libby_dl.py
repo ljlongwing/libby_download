@@ -322,7 +322,16 @@ class LibbyDownloader:
             )
 
         try:
-            input(">>> Press Enter when logged in: ")
+            # asyncio.to_thread, not a bare input() call: input() blocks
+            # the whole event loop, and Playwright needs that loop running
+            # to service the browser -- a bare input() here can leave any
+            # in-flight navigation stuck "pending" for as long as this
+            # prompt sits unanswered. Confirmed as the real cause of a
+            # "the page just spins forever" report on the equivalent Chirp
+            # prompt (F12 showed a stuck request that resolved the instant
+            # Enter was pressed); fixed here too since it's the same
+            # pattern with the same risk, just not yet reported for Libby.
+            await asyncio.to_thread(input, ">>> Press Enter when logged in: ")
         except EOFError:
             pass
 
@@ -706,7 +715,10 @@ class LibbyDownloader:
                 "  wait for the player to fully load, then press Enter here."
             )
             try:
-                input("  >>> Press Enter when player is open: ")
+                # asyncio.to_thread -- see the login prompt's comment for
+                # why a bare input() here risks leaving whatever the
+                # player is loading stuck pending until Enter is pressed.
+                await asyncio.to_thread(input, "  >>> Press Enter when player is open: ")
             except EOFError:
                 await page.wait_for_timeout(10_000)
 
