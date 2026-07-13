@@ -11,6 +11,7 @@ ENV/
 # IMPORTANT: These files contain your login tokens/secrets
 .libby_session.json
 .chirp_session.json
+*.har
 
 # Default output folders for books
 MyBooks/
