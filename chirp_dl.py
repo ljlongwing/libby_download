@@ -443,70 +443,87 @@ class ChirpDownloader:
         if "library" not in page.url.lower():
             await self._goto_library_with_retry(page)
 
-        # Chirp paginates library cards behind a "Load More" button (~15-20
-        # cards per batch), not infinite scroll -- confirmed live: scrolling
-        # to the bottom of /library never grew the card count on its own,
-        # while a "Load More" button (matched by visible text, not its
-        # CSS-module class name, which is build-specific and liable to
-        # change) was found driving the same pattern on a Chirp deals page,
-        # growing a live result count over repeated clicks. This also
-        # matches FetchCurrentUserAudiobooks' page/pageSize GraphQL
-        # variables observed earlier. Both pages also show a "Showing:
-        # X-Y of Z" line -- a more precise stop condition than "does the
-        # button still exist" (avoids one wasted click at the very end),
-        # kept as the primary check with the button as a fallback for
-        # when that text isn't found/parseable. Both are no-ops once
-        # everything's loaded, so this is harmless/fast for libraries that
-        # fit in the first batch too.
         # page.goto's "load" event only means the HTML/resources arrived --
         # the book list itself is fetched and rendered client-side
-        # afterward (via GraphQL), so checking for "Load More" immediately
-        # risks seeing a still-empty page and wrongly concluding there's
-        # nothing more to load, silently truncating to just the first
-        # batch. Wait for the first real card to actually render first.
-        # This race is far more likely on a slower machine (confirmed by a
-        # tester whose antivirus sandboxes the browser process, adding
-        # real latency) than on a fast dev machine, which is exactly the
-        # gap that let this slip through testing originally.
+        # afterward (via GraphQL), so scraping immediately risks seeing a
+        # still-empty page. Wait for the first real card to actually
+        # render first. This race is far more likely on a slower machine
+        # (confirmed by a tester whose antivirus sandboxes the browser
+        # process, adding real latency) than on a fast dev machine, which
+        # is exactly the gap that let the original version of this
+        # function slip through testing.
         try:
             await page.wait_for_selector('[data-testid="user-audiobook-card"]', timeout=15_000)
         except Exception:
             print("  Warning: no library cards appeared within 15s.")
 
-        showing_re = re.compile(r"Showing:\s*\d+-(\d+)\s*of\s*(\d+)", re.IGNORECASE)
-        clicks = 0
-        for _ in range(50):
+        # Chirp used to paginate behind a "Load More" button; a live repro
+        # (23-item library) found that button gone from the DOM entirely,
+        # replaced by a numbered pager (`[data-testid="pagination"]`, a
+        # `.rc-pagination-next` control) matching FetchCurrentUserAudiobooks'
+        # page/pageSize GraphQL variables. Clicking Next *replaces* the
+        # current page's cards rather than appending to them -- confirmed
+        # live: page 1 held 20 titles, page 2 held the remaining 3 with zero
+        # title overlap -- so each page has to be scraped and accumulated
+        # here, unlike the old accumulate-via-scroll assumption. Looking for
+        # "Load More" against this DOM always found nothing, silently
+        # stopping at whatever the first page happened to render.
+        books: list[dict] = []
+        seen_hrefs: set[str] = set()
+        for page_num in range(1, 51):  # sane upper bound against a runaway loop
+            for b in await self._scrape_shelf_cards(page):
+                if b["href"] not in seen_hrefs:
+                    seen_hrefs.add(b["href"])
+                    books.append(b)
+
+            next_btn = page.locator(".rc-pagination-next")
+            if await next_btn.count() == 0:
+                break
+            if await next_btn.get_attribute("aria-disabled") == "true":
+                break
+
+            first_title_before = books[-1]["title"] if books else None
             try:
-                text = await page.locator("body").inner_text()
-                m = showing_re.search(text)
-                if m and int(m.group(1)) >= int(m.group(2)):
-                    break
+                await next_btn.scroll_into_view_if_needed(timeout=10_000)
+                await next_btn.click(timeout=10_000)
+            except Exception as exc:
+                print(f"  Warning: pagination click failed, stopping there: {exc}")
+                break
+
+            # The click kicks off a GraphQL fetch, not an instant DOM swap;
+            # wait for the first card's title to actually change before
+            # scraping the "next" page, instead of a fixed sleep that could
+            # race the fetch and re-scrape the page we just read.
+            try:
+                await page.wait_for_function(
+                    """(prevTitle) => {
+                        const el = document.querySelector(
+                            '[data-testid="user-audiobook-card"] [class*="user_audiobook_card-module__title"] a'
+                        );
+                        return el && el.textContent.trim() !== prevTitle;
+                    }""",
+                    arg=first_title_before,
+                    timeout=10_000,
+                )
             except Exception:
                 pass
-            load_more = page.get_by_role("button", name=re.compile("load more", re.IGNORECASE))
-            try:
-                if await load_more.count() == 0:
-                    break
-                await load_more.first.scroll_into_view_if_needed(timeout=10_000)
-                await load_more.first.click(timeout=10_000)
-                await page.wait_for_timeout(1_500)
-                clicks += 1
-                print(f"  Loading more of your library... ({clicks} click{'s' if clicks != 1 else ''} so far)")
-            except Exception as exc:
-                print(f"  Warning: \"Load More\" click failed, stopping there: {exc}")
-                break
-        await page.evaluate("window.scrollTo(0, 0)")
-        await page.wait_for_timeout(1000)
+            await page.wait_for_timeout(500)
+            print(f"  Loading page {page_num + 1} of your library...")
 
-        try:
-            await page.wait_for_selector('[data-testid="user-audiobook-card"]', timeout=10_000)
-        except Exception:
-            print("  Warning: no library cards found (site layout may have changed).")
+        if not books:
+            link_count = await page.locator("a").count()
+            print(f"  Debug: Found {link_count} links on the page but no library cards matched.")
 
-        # Each owned book is a [data-testid="user-audiobook-card"]. The cover
-        # link (data-testid="cover-image-cover") points at the /player/<id>
-        # URL we need; the title/byline live in sibling divs within the card.
-        books = await page.evaluate(
+        return sorted(books, key=lambda b: b["title"].lower())
+
+    async def _scrape_shelf_cards(self, page: Page) -> list[dict]:
+        """Scrape the currently-rendered page of library cards.
+
+        Each owned book is a [data-testid="user-audiobook-card"]. The cover
+        link (data-testid="cover-image-cover") points at the /player/<id>
+        URL we need; the title/byline live in sibling divs within the card.
+        """
+        return await page.evaluate(
             """
             () => {
                 const results = [];
@@ -539,12 +556,6 @@ class ChirpDownloader:
             }
             """
         )
-
-        if not books:
-            link_count = await page.locator("a").count()
-            print(f"  Debug: Found {link_count} links on the page but no library cards matched.")
-
-        return sorted(books, key=lambda b: b["title"].lower())
 
     async def _get_series_metadata(self, page: Page, book: dict) -> dict:
         """Best-effort lookup of series name/position and total run time.
