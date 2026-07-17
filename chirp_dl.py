@@ -100,27 +100,30 @@ class ChirpDownloader:
                     print("No audiobooks found in your library.")
                     return
 
-                selection = self._prompt_selection(books)
-                if not selection:
-                    return
+                # Loop back to the selection prompt after each download (or
+                # batch of downloads) instead of exiting, so grabbing
+                # several books in one sitting doesn't mean relaunching the
+                # browser/session each time. Only 'q' at the prompt (or
+                # _prompt_selection returning None/empty) breaks out.
+                while True:
+                    selection = self._prompt_selection(books)
+                    if not selection:
+                        break
 
-                if selection == "all":
+                    multi = len(selection) > 1
                     downloaded = failed = 0
-                    for i, book in enumerate(books, 1):
-                        print(f"\n{'=' * 60}\n  Book {i}/{len(books)}: {book['title']}\n{'=' * 60}")
+                    for i, book in enumerate(selection, 1):
+                        if multi:
+                            print(f"\n{'=' * 60}\n  Book {i}/{len(selection)}: {book['title']}\n{'=' * 60}")
                         try:
                             await self._download_selected_book(page, context, player_page, book)
                             downloaded += 1
                         except RuntimeError as e:
                             print(f"\n{e}")
                             failed += 1
-                    print(f"\nDone: {downloaded} downloaded, {failed} failed.")
-                else:
-                    try:
-                        await self._download_selected_book(page, context, player_page, selection)
-                    except RuntimeError as e:
-                        print(f"\n{e}")
-                        return
+
+                    if multi:
+                        print(f"\nDone: {downloaded} downloaded, {failed} failed.")
 
             finally:
                 try:
@@ -591,9 +594,12 @@ class ChirpDownloader:
                 result["duration"] = lines[i + 1]
         return result
 
-    def _prompt_selection(self, books: list[dict]) -> Optional[Union[dict, str]]:
-        """Returns a single book dict, the literal string "all" (download
-        every book in the library), or None (quit)."""
+    def _prompt_selection(self, books: list[dict]) -> Optional[list[dict]]:
+        """Returns the list of book dicts to download, or None (quit).
+
+        Accepts a single number (2), a comma-separated list (1,3,5), a
+        range (1-5), any mix of those (1,3,5-8), or 'a' for all.
+        """
         print(f"\nFound {len(books)} item(s) in your library:\n")
         for i, b in enumerate(books, 1):
             suffix = f"  –  {b['author']}" if b.get("author") else ""
@@ -601,18 +607,21 @@ class ChirpDownloader:
         print()
 
         while True:
-            raw = input(f"Select [1-{len(books)}], 'a' for all, or q to quit: ").strip()
+            raw = input(
+                f"Select [1-{len(books)}] (e.g. 2 or 1,3,5-8), 'a' for all, or q to quit: "
+            ).strip()
             if raw.lower() == "q":
                 return None
             if raw.lower() == "a":
-                return "all"
-            try:
-                idx = int(raw) - 1
-                if 0 <= idx < len(books):
-                    return books[idx]
-            except ValueError:
-                pass
-            print(f"  Enter a number between 1 and {len(books)}, 'a' for all, or q to quit.")
+                return list(books)
+
+            indices = _parse_selection(raw, len(books))
+            if indices:
+                return [books[i] for i in indices]
+            print(
+                f"  Enter number(s) between 1 and {len(books)} (e.g. 2 or 1,3,5-8), "
+                "'a' for all, or q to quit."
+            )
 
     # ------------------------------------------------------------------
     # Player & Metadata
@@ -913,6 +922,35 @@ class ChirpDownloader:
 def _safe(s: str) -> str:
     if not s: return "Unknown"
     return re.sub(r'[\\/*?:"<>|]', "", s).strip()[:80]
+
+def _parse_selection(raw: str, count: int) -> Optional[list[int]]:
+    """Parses '1,3,5-8'-style input into a deduped, order-preserving list
+    of 0-based indices. Returns None if the input is empty or any token is
+    malformed / out of [1, count]."""
+    indices: list[int] = []
+    seen: set[int] = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        m = re.match(r"^(\d+)-(\d+)$", part)
+        if m:
+            start, end = int(m.group(1)), int(m.group(2))
+            if start > end:
+                start, end = end, start
+            nums = range(start, end + 1)
+        elif part.isdigit():
+            nums = (int(part),)
+        else:
+            return None
+        for n in nums:
+            idx = n - 1
+            if not (0 <= idx < count):
+                return None
+            if idx not in seen:
+                seen.add(idx)
+                indices.append(idx)
+    return indices or None
 
 def _fmt_ms(ms: int) -> str:
     total_seconds = int(ms / 1000)
