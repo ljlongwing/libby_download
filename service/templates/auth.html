@@ -4,10 +4,14 @@
 <p id="status">{{ status.message }}</p>
 
 <button id="loginBtn" onclick="startLogin()">Log In / Re-authenticate</button>
+<button id="manageBtn" onclick="startManage()">Manage Library Cards</button>
 
 <div id="vncWrap" style="display:none; margin-top:1rem;">
-  <p>Log in to {{ label }} below, just like you would in a normal browser tab. Once your shelf/library is visible, this page updates itself automatically.</p>
+  <p id="vncHint">Log in to {{ label }} below, just like you would in a normal browser tab. Once your shelf/library is visible, this page updates itself automatically.</p>
   <iframe id="vnc"></iframe>
+  <div id="doneWrap" style="display:none; margin-top:0.5rem;">
+    <button id="doneBtn" onclick="finishManage()">Done</button>
+  </div>
 </div>
 
 <script>
@@ -19,16 +23,33 @@ function vncUrl() {
 }
 
 async function startLogin() {
-  const resp = await fetch(`/auth/${source}/start`, {method: 'POST'});
+  await beginAuthFlow(false);
+}
+
+async function startManage() {
+  await beginAuthFlow(true);
+}
+
+async function beginAuthFlow(manage) {
+  const resp = await fetch(`/auth/${source}/start?manage=${manage}`, {method: 'POST'});
   const data = await resp.json();
   if (data.started === false) {
     document.getElementById('status').textContent = data.reason;
     return;
   }
+  document.getElementById('vncHint').textContent = manage
+    ? `Add or remove library cards for {{ label }} below, just like you would in a normal browser tab. Click Done when finished.`
+    : `Log in to {{ label }} below, just like you would in a normal browser tab. Once your shelf/library is visible, this page updates itself automatically.`;
+  document.getElementById('doneWrap').style.display = manage ? 'block' : 'none';
   const vnc = document.getElementById('vnc');
   vnc.src = vncUrl();
   document.getElementById('vncWrap').style.display = 'block';
   poll();
+}
+
+async function finishManage() {
+  document.getElementById('status').textContent = 'Saving session...';
+  await fetch(`/auth/${source}/finish`, {method: 'POST'});
 }
 
 async function poll() {

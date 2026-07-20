@@ -35,12 +35,23 @@ _state: dict[str, dict] = {
 }
 _auth_in_progress_source: Optional[str] = None
 
+# Set by finish_manage() when the user clicks "Done" during a manage-cards
+# session (see start_login(manage=True)) -- a fresh Event per source/run so
+# a stale set() from a previous session can't resolve the wait immediately.
+_finish_events: dict[str, asyncio.Event] = {s: asyncio.Event() for s in SOURCES}
+
+# Manage-cards mode has no login-completion signal to poll for (the user is
+# already logged in -- that's why the old flow closed the browser
+# immediately instead of giving them a chance to add a card), so it needs
+# its own generous ceiling instead of reusing the login wait's timeout.
+_MANAGE_TIMEOUT_S = 1800
+
 
 def get_status(source: str) -> dict:
     return {**_state[source], "authenticated": SOURCES[source]["session_file"].exists()}
 
 
-async def start_login(source: str) -> dict:
+async def start_login(source: str, manage: bool = False) -> dict:
     global _auth_in_progress_source
 
     if _state[source]["in_progress"]:
@@ -54,12 +65,26 @@ async def start_login(source: str) -> dict:
         }
 
     _auth_in_progress_source = source
-    _state[source].update(in_progress=True, success=None, message=f"Opening {SOURCES[source]['label']}...")
-    asyncio.create_task(_run_login_flow(source))
+    _finish_events[source] = asyncio.Event()
+    starting_message = (
+        f"Opening {SOURCES[source]['label']} for card management..."
+        if manage
+        else f"Opening {SOURCES[source]['label']}..."
+    )
+    _state[source].update(in_progress=True, success=None, message=starting_message)
+    asyncio.create_task(_run_login_flow(source, manage=manage))
     return {"started": True}
 
 
-async def _run_login_flow(source: str) -> None:
+def finish_manage(source: str) -> dict:
+    """Called when the user clicks "Done" after adding/removing cards in a
+    manage-cards session. No-op (but harmless) if no manage session is
+    currently waiting on it."""
+    _finish_events[source].set()
+    return {"ok": True}
+
+
+async def _run_login_flow(source: str, manage: bool = False) -> None:
     global _auth_in_progress_source
     cfg = SOURCES[source]
     # No downloads happen here; output_dir is just a required constructor
@@ -71,6 +96,37 @@ async def _run_login_flow(source: str) -> None:
             try:
                 await page.goto(cfg["login_url"], wait_until="load", timeout=60_000)
                 await page.wait_for_timeout(2_000)
+
+                if manage:
+                    # Unlike a plain login, being already-authenticated is
+                    # the expected starting point here -- the whole point is
+                    # to give the user a window to add/remove library cards
+                    # on an account that's already logged in, so don't treat
+                    # that as "done" the way the login flow does.
+                    _state[source]["message"] = (
+                        "Add or remove library cards in the embedded browser below, "
+                        "then click Done."
+                    )
+                    try:
+                        await asyncio.wait_for(
+                            _finish_events[source].wait(), timeout=_MANAGE_TIMEOUT_S
+                        )
+                        timed_out = False
+                    except asyncio.TimeoutError:
+                        timed_out = True
+                    try:
+                        await context.storage_state(path=str(cfg["session_file"]), indexed_db=True)
+                    except Exception:
+                        await context.storage_state(path=str(cfg["session_file"]))
+                    _state[source].update(
+                        success=True,
+                        message=(
+                            "Card management session timed out — session saved anyway."
+                            if timed_out
+                            else "Session saved."
+                        ),
+                    )
+                    return
 
                 if await downloader._is_logged_in(page):
                     try:

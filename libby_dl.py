@@ -146,6 +146,50 @@ class LibbyDownloader:
                         pass
                 await browser.close()
 
+    async def manage_cards(self) -> None:
+        """Open the browser straight to Libby and let the user add/remove
+        library cards, independent of whether a session is already saved.
+
+        _ensure_authenticated() treats "already logged in" as "nothing to
+        do" and returns immediately -- correct for a normal download run,
+        but it means once a session file exists there's no way to get the
+        browser to sit still long enough to register a newly-borrowed
+        card's library. This bypasses that shortcut: it always opens the
+        window and always waits on the same Enter-to-continue prompt used
+        during first-time login, regardless of login state, so adding a
+        card doesn't require deleting the session file first.
+        """
+        if self.headless:
+            print(
+                "--manage-cards needs a visible browser window to add/remove "
+                "library cards; it cannot run with --headless."
+            )
+            return
+
+        async with async_playwright() as pw:
+            browser, context, page, _player_page = await self._launch_browser_context(pw)
+            try:
+                await page.goto(LIBBY_URL, wait_until="load", timeout=60_000)
+                await page.wait_for_timeout(2_000)
+
+                print(
+                    "\nThe browser window is open. Add or remove library cards "
+                    "inside Libby, then come back here and press Enter to save "
+                    "the session.\n"
+                )
+                try:
+                    await asyncio.to_thread(input, ">>> Press Enter when done: ")
+                except EOFError:
+                    pass
+
+                try:
+                    await context.storage_state(path=str(SESSION_FILE), indexed_db=True)
+                except Exception:
+                    await context.storage_state(path=str(SESSION_FILE))
+                print(f"Session saved to {SESSION_FILE}\n")
+            finally:
+                await browser.close()
+
     async def _launch_browser_context(self, pw):
         """Launch a browser + context, loading a saved session if present.
 
@@ -2834,6 +2878,12 @@ def main() -> None:
         metavar="MINS",
         help="Minutes of audio to skip per batch when filling part gaps (default: 5.0)",
     )
+    parser.add_argument(
+        "--manage-cards",
+        action="store_true",
+        help="Open the browser to add/remove library cards, then exit "
+        "(skips the shelf/download flow; works even with an existing session)",
+    )
     args = parser.parse_args()
 
     dl = LibbyDownloader(
@@ -2843,7 +2893,10 @@ def main() -> None:
         skip_minutes=args.skip_minutes,
     )
     try:
-        asyncio.run(dl.run())
+        if args.manage_cards:
+            asyncio.run(dl.manage_cards())
+        else:
+            asyncio.run(dl.run())
     except Exception:
         import traceback
         traceback.print_exc()

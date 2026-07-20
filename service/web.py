@@ -125,9 +125,15 @@ async def auth_page(request: Request, source: str):
 
 
 @app.post("/auth/{source}/start")
-async def auth_start(source: str):
+async def auth_start(source: str, manage: bool = False):
     _source_or_404(source)
-    return await auth_session.start_login(source)
+    return await auth_session.start_login(source, manage=manage)
+
+
+@app.post("/auth/{source}/finish")
+async def auth_finish(source: str):
+    _source_or_404(source)
+    return auth_session.finish_manage(source)
 
 
 @app.get("/auth/{source}/status")
