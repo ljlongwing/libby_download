@@ -128,16 +128,28 @@ async def scan_once(source: str) -> dict:
                         # session silently scrapes a login/redirect page,
                         # finds no books, and reports it identically to a
                         # genuinely empty shelf -- no way to tell the two
-                        # apart. Same navigate-then-check sequence already
-                        # proven by _ensure_authenticated (CLI) and
-                        # auth_session.py (web login), just without the
-                        # interactive wait: a scheduled scan can't sit
-                        # around for a human, so an invalid session here is
-                        # reported plainly instead.
+                        # apart.
                         await page.goto(cfg["login_url"], wait_until="load", timeout=60_000)
-                        await page.wait_for_timeout(2_000)
 
-                        if not await downloader._is_logged_in(page):
+                        # A single check right after "load" isn't enough --
+                        # the SPA still has to redirect/hydrate client-side,
+                        # which can take longer than 2s under Xvfb + the
+                        # bundled (non-GPU) Chromium. A one-shot check here
+                        # caught a freshly-saved, genuinely valid session
+                        # mid-hydration and reported it as expired even
+                        # though _wait_for_login (web login) had just
+                        # confirmed it moments earlier. Poll like
+                        # _wait_for_login does instead of trusting a single
+                        # snapshot; a scheduled scan can afford a few extra
+                        # seconds before giving up.
+                        logged_in = False
+                        for _ in range(6):
+                            if await downloader._is_logged_in(page):
+                                logged_in = True
+                                break
+                            await page.wait_for_timeout(2_000)
+
+                        if not logged_in:
                             session_expired = True
                         else:
                             books = await downloader._get_shelf(page)
