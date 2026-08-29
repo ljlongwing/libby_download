@@ -1,10 +1,11 @@
-# Audiobook Downloaders (Libby + Chirp)
+# Audiobook Downloaders (Libby + Chirp + Fabuly)
 
-This repo contains two related, standalone tools that are provided for **educational purposes only**. They are designed to demonstrate how web automation and network traffic analysis can be used to interact with web applications.
+This repo contains a few related, standalone tools that are provided for **educational purposes only**. They are designed to demonstrate how web automation and network traffic analysis can be used to interact with web applications.
 
 *   **`libby_dl.py`** — downloads your borrowed audiobooks from **Libby** (libbyapp.com).
 *   **`chirp_dl.py`** — downloads your purchased audiobooks from **Chirp Books** (chirpbooks.com).
-*   **`service/`** — an optional self-hosted web service that runs both tools automatically on a schedule (see below), so borrowing a book in Libby or owning one on Chirp gets it downloaded without you running anything by hand.
+*   **`fabuly_dl.py`** — downloads public-domain classic audiobooks from **Fabuly** (fabuly.io). No login, no browser — Fabuly serves its whole catalogue as plain files from a public bucket.
+*   **`service/`** — an optional self-hosted web service that runs the Libby and Chirp tools automatically on a schedule (see below), so borrowing a book in Libby or owning one on Chirp gets it downloaded without you running anything by hand.
 
 ### 🐳 Automated download service (Docker)
 
@@ -31,13 +32,31 @@ Then visit `http://<host>:8000`, go to **Authentication**, and log in.
 
 This is newer and less battle-tested than the CLI tools above — if something's off, check `docker compose logs -f`.
 
+*(The service covers Libby and Chirp only. Fabuly needs no scanning or login, so there's nothing for a background loop to do — just run `fabuly_dl.py` when you want a book.)*
+
+### 📚 Fabuly (`fabuly_dl.py`)
+
+[Fabuly](https://fabuly.io) is a free app for **public-domain** classic audiobooks (LibriVox-style recordings plus its own "enhanced" narrations). It has no DRM: every audio part is an ordinary `.m4a` file, and the entire catalogue — audio, cover art, chapter data, and the index itself — is served anonymously from a public Google Cloud Storage bucket. So this tool needs **no account, no browser automation, and no HAR capture** — it just reads the bucket.
+
+```bash
+python fabuly_dl.py --list                      # browse the curated catalogue
+python fabuly_dl.py --book "A Christmas Carol"   # title search -> pick -> download
+python fabuly_dl.py --book a_christmas_carol_charles_dickens_en   # exact slug
+python fabuly_dl.py --book "Captains Courageous" --enhanced       # premium narration
+python fabuly_dl.py --book "The Viy" --mp3 --ffmpeg /path/to/ffmpeg  # transcode to MP3
+```
+
+For each book it downloads every audio part (`<Book>-PartNNN.m4a`), tags them (title / author / narrator / cover art), and writes a `<Book>.cue` in the same shape `chirp_dl.py` produces — Fabuly ships one audio part per chapter, so each `FILE` gets a single `TRACK` with the real chapter title pulled from the book's data blob. Feed that `.cue` to `LibbyDownload.jar -cue … -c` if you want per-chapter files or different tagging.
+
+Only dependency is `mutagen`. `ffmpeg` is optional and only used by `--mp3`.
+
 ### 🔒 Why isn't there a Hoopla downloader?
 Hoopla's audiobooks *and* video both stream through **Widevine/PlayReady DRM** (via castLabs DRMtoday — confirmed by inspecting the DASH manifest: `ContentProtection` / `cenc:default_KID` elements and real Widevine/PlayReady license requests to `patron-api-gateway.hoopladigital.com`). That's genuine content encryption, not just an access-token quirk like the ones these tools work around for Libby/Chirp, so building a downloader for it would mean circumventing DRM — illegal under DMCA §1201 regardless of having a valid loan. This isn't going to change, so there's no need to re-investigate it.
 
 ### ⚖️ Disclaimer
-*   **Valid Access Required:** These tools are intended only for users who have a **valid, active loan** (Libby) or have **purchased** the title (Chirp) they are accessing.
+*   **Valid Access Required:** These tools are intended only for users who have a **valid, active loan** (Libby) or have **purchased** the title (Chirp) they are accessing. Fabuly's catalogue is public-domain content served without authentication; use it for your own personal listening and don't hammer the bucket.
 *   **Personal Use Only:** Any files downloaded using these tools should be for your own personal, private use. Redistribution of copyrighted material is a violation of copyright law and the Terms of Service of your library, Libby, and Chirp.
-*   **No Affiliation:** This project is **not** affiliated with, endorsed by, or supported by Libby, OverDrive, Chirp Books, or any library system.
+*   **No Affiliation:** This project is **not** affiliated with, endorsed by, or supported by Libby, OverDrive, Chirp Books, Fabuly, or any library system.
 *   **User Responsibility:** By using these tools, you agree to comply with all applicable laws and the Terms of Service of the platforms you are accessing. The author assumes no liability for misuse of these tools.
 
 ---
@@ -48,11 +67,13 @@ If you don't want to install Python, you can download the "standalone" version f
 
 1.  Go to the **[Releases](https://github.com/ljlongwing/libby_download/releases)** page.
 2.  Download the file(s) for your system:
-    *   **Windows**: `LibbyDownloader.exe` and/or `ChirpDownloader.exe`
-    *   **Linux**: `LibbyDownloader` and/or `ChirpDownloader`
+    *   **Windows**: `LibbyDownloader.exe`, `ChirpDownloader.exe`, and/or `FabulyDownloader.exe`
+    *   **Linux**: `LibbyDownloader`, `ChirpDownloader`, and/or `FabulyDownloader`
 3.  Double-click the file to start!
 
-*Note: You may still need to install **FFmpeg** if you want the Libby tool to split the book into chapters (see below). The Chirp tool downloads each chapter as its own file already, so FFmpeg isn't needed for it.*
+*Note: You may still need to install **FFmpeg** if you want the Libby tool to split the book into chapters (see below). The Chirp and Fabuly tools download each chapter as its own file already, so FFmpeg isn't needed for them (Fabuly only uses it for the optional `--mp3` transcode).*
+
+*Build them yourself with [PyInstaller](https://pyinstaller.org): `pyinstaller LibbyDownloader.spec` (or `ChirpDownloader.spec` / `FabulyDownloader.spec`). The Fabuly build is by far the smallest — no bundled browser.*
 
 **Your antivirus may flag the .exe as suspicious or run it sandboxed.** This is a known false positive for PyInstaller-built Python executables in general — they're unsigned, and their packed structure can resemble the packing techniques some malware uses to evade detection, even though there's nothing malicious in them. Running sandboxed shouldn't stop the tool from working, just slow it down; if it does cause problems, tell your antivirus to trust the file (or run it via Python instead — see Option 2 below, which doesn't trigger this since there's no compiled executable involved).
 
@@ -166,3 +187,9 @@ Every time you run a script after that, it will:
 2. **Reading the chapter list**: It opens the book's player page and reads the exact chapter list (names, lengths) directly from the page — no guessing or fast-forwarding needed.
 3. **Downloading**: For each chapter, it selects it in the player and starts playback just long enough to capture that chapter's complete audio file.
 4. **Organizing**: It tags each chapter file with the title, author, narrator, and cover art, and writes both a `.cue` file and a plain-text chapter list.
+
+### Fabuly
+1. **Reading the catalogue**: The tool downloads Fabuly's public catalogue index and finds the book you named (by title, or by its exact bucket slug).
+2. **Downloading**: It reads the book's folder in the public bucket and pulls every audio part directly — no player, no login, no capture. `--enhanced` grabs the premium narration instead.
+3. **Chapter titles**: It parses the book's data blob (the same one the app uses for read-along) to recover real chapter names. Fabuly stores one audio part per chapter, so parts and chapters line up 1:1.
+4. **Organizing**: It tags each part with title, author, narrator, and cover art, and writes a `.cue` (one `FILE` per part) that `LibbyDownload.jar -cue` can consume for splitting or re-tagging.

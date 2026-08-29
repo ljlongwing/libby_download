@@ -17,6 +17,7 @@ ENV/
 MyBooks/
 libby_downloads/
 chirp_downloads/
+fabuly_downloads/
 
 # --- PyInstaller build output ---
 build/
