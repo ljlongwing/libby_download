@@ -33,19 +33,22 @@ What this script does:
 
 Usage:
 
-    python fabuly_dl.py                       # then: list <term> / a title / lv:<id>
+    python fabuly_dl.py                       # graphical catalogue browser
+    python fabuly_dl.py --no-gui             # text browser: search -> pick a number
     python fabuly_dl.py --list --csv out.csv  # dump the whole ~19.5k catalogue
-    python fabuly_dl.py --book "Captains Courageous"          # Fabuly-hosted
-    python fabuly_dl.py --book "moby dick"                    # picks across both sources
+    python fabuly_dl.py --book "moby dick"                    # search both sources
     python fabuly_dl.py --book lv:54                          # LibriVox book id 54
     python fabuly_dl.py --book _the_viy_nicholas_gogol_en --enhanced
     python fabuly_dl.py --book "A Christmas Carol" --mp3 --ffmpeg C:\\ffmpeg\\bin\\ffmpeg.exe
 
-Run with no --book for an interactive prompt: ``list twain`` to filter the
-catalogue, then a title / Fabuly slug / ``lv:<id>`` to download.
+With no --book you get the GUI (or, with --no-gui, a text browser that
+searches title/author/genre/language and downloads by number).  The merged
+catalogue is cached at ~/.fabuly_catalog.json for a week; --refresh rebuilds
+it.
 
-Third-party dependency: ``mutagen`` (``ffmpeg`` optional, only for --mp3).
-``librivox.db`` must sit next to this script for LibriVox titles.
+Third-party dependency: ``mutagen`` (``ffmpeg`` optional, only for --mp3;
+``tkinter`` is stdlib and only needed for the GUI).  ``librivox.db`` must sit
+next to this script for LibriVox titles.
 """
 
 from __future__ import annotations
@@ -73,6 +76,33 @@ from mutagen.mp4 import MP4, MP4Cover
 BUCKET = "https://storage.googleapis.com/dopex_public_us"
 UA = "fabuly_dl/1.0 (+https://fabuly.io)"
 HTTP_RETRIES = 4
+
+# Merged catalogue is cached here so repeat runs / GUI launches skip the
+# ~8 s rebuild.  `--refresh` ignores it; it self-expires after CATALOG_TTL.
+CATALOG_CACHE = Path.home() / ".fabuly_catalog.json"
+CATALOG_TTL = 7 * 24 * 3600  # seconds
+_CACHE_SCHEMA = 3            # bump when the row shape changes
+
+
+def _read_catalog_cache() -> "Optional[list[dict]]":
+    try:
+        if time.time() - CATALOG_CACHE.stat().st_mtime > CATALOG_TTL:
+            return None
+        blob = json.loads(CATALOG_CACHE.read_text(encoding="utf-8"))
+        if blob.get("schema") == _CACHE_SCHEMA and blob.get("rows"):
+            return blob["rows"]
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _write_catalog_cache(rows: "list[dict]") -> None:
+    try:
+        CATALOG_CACHE.write_text(
+            json.dumps({"schema": _CACHE_SCHEMA, "rows": rows}),
+            encoding="utf-8")
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +317,24 @@ def load_creators_full() -> list[dict]:
     return _CREATORS_RAW
 
 
+_GENRE_NAMES: Optional[dict[str, str]] = None
+
+
+def load_genre_names() -> dict[str, str]:
+    """Map Fabuly subCategoryId -> human display name."""
+    global _GENRE_NAMES
+    if _GENRE_NAMES is None:
+        data = http_get_json(f"{BUCKET}/books_genres_hierarchy.json",
+                             optional=True) or {}
+        m: dict[str, str] = {}
+        for cat in data.get("categories", []):
+            for sub in cat.get("subCategories", []):
+                if sub.get("subCategoryId"):
+                    m[sub["subCategoryId"]] = sub.get("displayName") or sub["subCategoryId"]
+        _GENRE_NAMES = m
+    return _GENRE_NAMES
+
+
 def load_creators() -> dict[str, str]:
     """Map creator id -> display name (authors, narrators, designers)."""
     return {c["id"]: c.get("name") or c["id"]
@@ -454,13 +502,15 @@ def parse_selection(raw: str, count: int) -> Optional[list[int]]:
 class FabulyDownloader:
     def __init__(self, out_dir: str, *, ffmpeg: Optional[str] = None,
                  enhanced: bool = False, to_mp3: bool = False,
-                 want_cover: bool = True, debug: bool = False) -> None:
+                 want_cover: bool = True, debug: bool = False,
+                 refresh: bool = False) -> None:
         self.out_dir = Path(out_dir)
         self.ffmpeg = ffmpeg or shutil.which("ffmpeg")
         self.enhanced = enhanced
         self.to_mp3 = to_mp3
         self.want_cover = want_cover
         self.debug = debug
+        self.refresh = refresh
         self._featured: Optional[list[dict]] = None
         self._creators: Optional[dict[str, str]] = None
         self._catalog: Optional[list[dict]] = None
@@ -483,27 +533,42 @@ class FabulyDownloader:
             self._creators = load_creators()
         return self._creators
 
+    _LANG_CODES = {"en": "English", "de": "German", "es": "Spanish",
+                   "fr": "French", "it": "Italian", "pt": "Portuguese",
+                   "ru": "Russian", "nl": "Dutch"}
+
     def catalogue_rows(self) -> list[dict]:
-        """Every downloadable book: the curated storefront plus the handful
-        of bucket-only titles.  Rows: title, author, narrators, duration,
-        enhanced, categories, slug, source."""
+        """Every downloadable book.  Row keys: title, author, narrators,
+        duration, language, genre, enhanced, slug, source."""
         authors = {b.get("author", "") for b in self.featured if b.get("author")}
         authors |= {c.get("name", "") for c in
                     (load_creators_full() or []) if c.get("type") == "AUTHOR"}
         authors = {a for a in authors if a}
+        gnames = load_genre_names()
+
+        def _hms(d: int) -> str:
+            return f"{d // 3600}:{d % 3600 // 60:02d}" if d else ""
+
+        def _slug_lang(slug: str) -> str:
+            m = re.search(r"_([a-z]{2})(?:_original)?$", slug)
+            return self._LANG_CODES.get(m.group(1), "") if m else ""
 
         rows: dict[str, dict] = {}
         for b in self.featured:
-            d = b.get("durationInSeconds") or 0
-            rows[b["bookId"]] = {
+            sid = b["bookId"]
+            rows[sid] = {
                 "title": b.get("title", ""),
                 "author": b.get("author", ""),
                 "narrators": "; ".join(self.creators.get(n, n.replace("_", " ").title())
                                        for n in b.get("narratorsIds", []) or []),
-                "duration": f"{d // 3600}:{d % 3600 // 60:02d}",
+                "duration": _hms(b.get("durationInSeconds") or 0),
+                "language": _slug_lang(sid) or "English",
+                "genre": "; ".join(dict.fromkeys(
+                    gnames.get(g, g.replace("_", " ").title())
+                    for g in b.get("subCategoryIds", []) or []
+                    if g not in ("new", "recommendations"))),
                 "enhanced": "yes" if b.get("isEnhancedAudioAvailable") else "",
-                "categories": "; ".join(b.get("subCategoryIds", []) or []),
-                "slug": b["bookId"],
+                "slug": sid,
                 "source": "storefront",
             }
         print("Scanning bucket for any titles outside the storefront ...")
@@ -518,33 +583,76 @@ class FabulyDownloader:
                 title = bm["title"] or title
                 author = bm["author"] or author
             rows[slug] = {"title": title, "author": author, "narrators": "",
-                          "duration": "", "enhanced": "", "categories": "",
-                          "slug": slug, "source": "bucket-only"}
+                          "duration": "", "language": _slug_lang(slug) or "English",
+                          "genre": "", "enhanced": "", "slug": slug,
+                          "source": "bucket-only"}
         for b in load_librivox():
-            d = b["duration"]
             rows[f"lv:{b['librivox_id']}"] = {
                 "title": b["title"], "author": b["author"], "narrators": "",
-                "duration": f"{d // 3600}:{d % 3600 // 60:02d}" if d else "",
-                "enhanced": "", "categories": b["language"],
-                "slug": f"lv:{b['librivox_id']}", "source": "librivox",
+                "duration": _hms(b["duration"]), "language": b["language"],
+                "genre": "", "enhanced": "", "slug": f"lv:{b['librivox_id']}",
+                "source": "librivox",
             }
         return sorted(rows.values(),
                       key=lambda r: (r["author"].lower(), r["title"].lower()))
 
     @property
     def catalog(self) -> list[dict]:
-        """Cached full catalogue (built once per run)."""
-        if self._catalog is None:
-            self._catalog = self.catalogue_rows()
+        """The full merged catalogue.  Held for the process, and cached on
+        disk (see CATALOG_CACHE) so repeat runs / GUI launches are instant.
+        """
+        if self._catalog is not None:
+            return self._catalog
+        if not self.refresh:
+            cached = _read_catalog_cache()
+            if cached is not None:
+                age_h = (time.time() - CATALOG_CACHE.stat().st_mtime) / 3600
+                print(f"Catalogue: {len(cached):,} books from cache "
+                      f"({age_h:.0f}h old; --refresh to rebuild)")
+                self._catalog = cached
+                return self._catalog
+        self._catalog = self.catalogue_rows()
+        _write_catalog_cache(self._catalog)
         return self._catalog
 
     @staticmethod
-    def _print_row(r: dict) -> None:
-        dur = f"  ({r['duration']})" if r["duration"] else ""
-        enh = "  [enhanced]" if r["enhanced"] else ""
-        extra = "  [bucket-only]" if r["source"] == "bucket-only" else ""
-        print(f"  {r['title']}  -- {r['author'] or '?'}{dur}{enh}{extra}")
-        print(f"      slug: {r['slug']}")
+    def _row_text(r: dict) -> str:
+        """All searchable text for a row, lower-cased."""
+        return " ".join((r["title"], r["author"], r["genre"], r["language"],
+                         r["slug"], _deslug(r["slug"]))).lower()
+
+    def filter_catalog(self, query: str = "", *, source: str = "",
+                       language: str = "", genre: str = "") -> list[dict]:
+        """Filter the full catalogue.  ``query`` is AND-ed word-by-word over
+        title/author/genre/language/slug; the others are exact-ish facets."""
+        rows = self.catalog
+        words = [w for w in re.split(r"\s+", query.strip().lower()) if w]
+        src = source.strip().lower()
+        lang = language.strip().lower()
+        gen = genre.strip().lower()
+        out = []
+        for r in rows:
+            if src and r["source"] != src:
+                continue
+            if lang and r["language"].lower() != lang:
+                continue
+            if gen and gen not in r["genre"].lower():
+                continue
+            if words:
+                hay = self._row_text(r)
+                if not all(w in hay for w in words):
+                    continue
+            out.append(r)
+        return out
+
+    @staticmethod
+    def _print_row(r: dict, n: Optional[int] = None) -> None:
+        num = f"{n:4d}. " if n is not None else "  "
+        bits = [b for b in (r["duration"], r["language"] if r["source"] == "librivox"
+                            else "", "enhanced" if r["enhanced"] else "",
+                            r["source"]) if b]
+        print(f"{num}{r['title']}  -- {r['author'] or '?'}  ({', '.join(bits)})")
+        print(f"      {r['slug']}")
 
     def list_catalogue(self, csv_path: Optional[str] = None) -> None:
         rows = self.catalog
@@ -564,34 +672,20 @@ class FabulyDownloader:
         for r in rows:
             self._print_row(r)
 
-    def _browse(self, term: str = "") -> None:
-        """Interactive catalogue view, optionally filtered by ``term``."""
-        rows = self.catalog
-        t = term.strip().lower()
-        if not t:
-            print(f"  {len(rows)} titles total (Fabuly + LibriVox) -- too many to "
-                  f"scroll.\n  Narrow it:  list twain   list \"sherlock holmes\"   "
-                  f"list dickens\n  Or export everything:  --list --csv books.csv")
-            return
-        tn = re.sub(r"[^a-z0-9]+", "_", t).strip("_")
-        rows = [r for r in rows
-                if t in r["title"].lower() or t in r["author"].lower()
-                or t in r["slug"].lower() or tn in r["slug"].lower()
-                or t in _deslug(r["slug"]).lower()]
-        if not rows:
-            print(f"  nothing matches {term!r}")
-            return
-        for r in rows[:400]:
-            self._print_row(r)
-        more = f"  (showing first 400 of {len(rows)})\n" if len(rows) > 400 else ""
-        print(f"\n{more}  {min(len(rows), 400)} of {len(rows)} title(s) matching "
-              f"{term!r}. Type a title or slug to download.")
-
     @staticmethod
     def _book_ref(b: dict) -> str:
         if "librivox_id" in b:
             return f"lv:{b['librivox_id']}"
         return b.get("bookId") or b.get("slug") or "?"
+
+    @staticmethod
+    def row_to_book(row: dict) -> dict:
+        """Catalogue row -> a book dict process() understands."""
+        if row["slug"].startswith("lv:"):
+            return {"librivox_id": int(row["slug"][3:]),
+                    "title": row["title"], "author": row["author"]}
+        return {"bookId": row["slug"], "title": row["title"],
+                "author": row["author"]}
 
     def _resolve(self, query: str) -> list[dict]:
         """Return candidate book dicts.  A Fabuly book carries ``bookId``;
@@ -645,11 +739,9 @@ class FabulyDownloader:
             author = b.get("author") or ""
             print(f"  {i:3d}. {title}  {('-- ' + author) if author else ''}")
             print(f"       {ref}")
-        raw = input("\nSelect (number, list, 1-3, or 'all'): ")
+        raw = input("\nSelect (number, 1-3, 'all', or blank to cancel): ")
         idx = parse_selection(raw, len(candidates))
-        if not idx:
-            sys.exit("Nothing selected.")
-        return [candidates[i] for i in idx]
+        return [candidates[i] for i in idx] if idx else []
 
     # -- per book -----------------------------------------------------
 
@@ -908,33 +1000,303 @@ class FabulyDownloader:
 
     # -- entry --------------------------------------------------------
 
-    def run(self, query: Optional[str]) -> None:
-        if not query:
-            print("Enter a book title, Fabuly slug, or 'lv:<id>' to download.")
-            print("Browse first:")
-            print("    list <term>     titles matching <term>  (Fabuly + ~19k LibriVox)")
-            print("    q               quit")
-        while not query:
-            raw = input("\nfabuly> ").strip()
-            head = raw.split(None, 1)[0].lower() if raw else ""
-            if head in ("q", "quit", "exit"):
-                return
-            if head in ("list", "l", "ls", "?"):
-                term = raw.split(None, 1)[1] if len(raw.split(None, 1)) > 1 else ""
-                self._browse(term)
-                continue
-            query = raw
-        candidates = self._resolve(query)
-        if not candidates:
-            sys.exit(f"No book matched {query!r}.")
-        chosen = candidates if len(candidates) == 1 else self._prompt(candidates)
-        for b in chosen:
+    def _download_books(self, books: list[dict]) -> None:
+        for b in books:
             try:
                 self.process(b)
             except Exception as e:  # noqa: BLE001
                 print(f"  ERROR on {self._book_ref(b)}: {e}")
                 if self.debug:
                     raise
+
+    def run(self, query: Optional[str]) -> None:
+        """--book path: resolve, then download (or fall into the browser)."""
+        if not query:
+            return self.browse_repl()
+        candidates = self._resolve(query)
+        if not candidates:
+            print(f"Nothing matched {query!r}. Opening the browser instead.\n")
+            return self.browse_repl()
+        chosen = candidates if len(candidates) == 1 else self._prompt(candidates)
+        self._download_books(chosen)
+
+    def browse_repl(self) -> None:
+        """Forgiving text browser: search -> numbered list -> pick a number."""
+        print("\nType words to search the catalogue "
+              f"({len(self.catalog):,} books, Fabuly + LibriVox).")
+        print("Search matches title, author, genre, language.  Examples:")
+        print("    sherlock holmes        dickens        twain ghost")
+        print("Then type the number of a book to download it.  'q' to quit.\n")
+        results: list[dict] = []
+        while True:
+            try:
+                raw = input("search (or number)> ").strip()
+            except EOFError:
+                return
+            if raw.lower() in ("q", "quit", "exit"):
+                return
+            if not raw:
+                continue
+            if raw.isdigit() and results:
+                i = int(raw)
+                if 1 <= i <= len(results):
+                    self._download_books([self.row_to_book(results[i - 1])])
+                else:
+                    print(f"  no #{i} in the list above (1-{len(results)})")
+                continue
+            # explicit slug / lv:id still works
+            if re.fullmatch(r"(?:lv[:#]?|#)\d{1,7}|[a-z0-9_]{6,}", raw):
+                cand = self._resolve(raw)
+                if cand:
+                    self._download_books(cand[:1])
+                    continue
+            results = self.filter_catalog(raw)
+            if not results:
+                print(f"  no matches for {raw!r} -- try fewer or different words")
+                continue
+            shown = results[:60]
+            for n, r in enumerate(shown, 1):
+                self._print_row(r, n)
+            tail = f"  (showing 60 of {len(results)}; add words to narrow)\n" \
+                if len(results) > 60 else ""
+            print(f"\n{tail}  {len(shown)} shown. Type a number to download, "
+                  f"or search again.")
+
+
+# ---------------------------------------------------------------------------
+# GUI  (tkinter -- stdlib; optional)
+# ---------------------------------------------------------------------------
+
+class _QueueWriter:
+    """A file-like that funnels writes to a queue, splitting on \\r and \\n
+    so a Tk log can show progress lines that overwrite themselves."""
+
+    def __init__(self, q):
+        self.q = q
+        self._buf = ""
+
+    def write(self, s: str) -> int:
+        for ch in s:
+            if ch == "\n":
+                self.q.put(("line", self._buf))
+                self._buf = ""
+            elif ch == "\r":
+                self.q.put(("cr", self._buf))
+                self._buf = ""
+            else:
+                self._buf += ch
+        return len(s)
+
+    def flush(self) -> None:
+        if self._buf:
+            self.q.put(("cr", self._buf))
+
+
+def run_gui(dl: "FabulyDownloader") -> None:
+    import queue
+    import threading
+    import tkinter as tk
+    from tkinter import filedialog, ttk
+    from tkinter.scrolledtext import ScrolledText
+
+    root = tk.Tk()  # raises if there's no display -> caller falls back to text
+
+    # Tk is up: on a double-clicked Windows .exe a console also opened; hide
+    # it so the GUI stands alone.  (CLI invocations never reach here.)
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+            if hwnd:
+                ctypes.windll.user32.ShowWindow(hwnd, 0)
+        except Exception:  # noqa: BLE001
+            pass
+
+    root.title("Fabuly / LibriVox audiobook browser")
+    root.geometry("1000x680")
+    root.minsize(760, 480)
+
+    state = {"rows": [], "shown": [], "busy": False}
+    logq: "queue.Queue" = queue.Queue()
+
+    # --- top: search + facets ------------------------------------------
+    top = ttk.Frame(root, padding=8)
+    top.pack(fill="x")
+    ttk.Label(top, text="Search").grid(row=0, column=0, sticky="w")
+    q_var = tk.StringVar()
+    q_entry = ttk.Entry(top, textvariable=q_var)
+    q_entry.grid(row=0, column=1, columnspan=5, sticky="ew", padx=(4, 12))
+    q_entry.focus_set()
+
+    src_var = tk.StringVar(value="all sources")
+    lang_var = tk.StringVar(value="all languages")
+    genre_var = tk.StringVar(value="all genres")
+    src_cb = ttk.Combobox(top, textvariable=src_var, state="readonly", width=16,
+                          values=["all sources", "storefront", "bucket-only",
+                                  "librivox"])
+    lang_cb = ttk.Combobox(top, textvariable=lang_var, state="readonly", width=16)
+    genre_cb = ttk.Combobox(top, textvariable=genre_var, state="readonly", width=26)
+    src_cb.grid(row=1, column=1, sticky="w", pady=(6, 0))
+    lang_cb.grid(row=1, column=2, sticky="w", padx=6, pady=(6, 0))
+    genre_cb.grid(row=1, column=3, sticky="w", pady=(6, 0))
+    top.columnconfigure(1, weight=1)
+
+    # --- middle: results table ---------------------------------------
+    mid = ttk.Frame(root, padding=(8, 0))
+    mid.pack(fill="both", expand=True)
+    cols = ("title", "author", "duration", "language", "source")
+    tree = ttk.Treeview(mid, columns=cols, show="headings", selectmode="browse")
+    widths = {"title": 420, "author": 220, "duration": 70, "language": 90,
+              "source": 90}
+    for c in cols:
+        tree.heading(c, text=c.title(),
+                     command=lambda cc=c: _sort_by(cc))
+        tree.column(c, width=widths[c], anchor="w")
+    vs = ttk.Scrollbar(mid, orient="vertical", command=tree.yview)
+    tree.configure(yscrollcommand=vs.set)
+    tree.pack(side="left", fill="both", expand=True)
+    vs.pack(side="right", fill="y")
+
+    status = ttk.Label(root, text="Loading catalogue ...", padding=(10, 2))
+    status.pack(fill="x")
+
+    # --- bottom: output + download + log ---------------------------
+    bot = ttk.Frame(root, padding=8)
+    bot.pack(fill="x")
+    ttk.Label(bot, text="Save to").grid(row=0, column=0, sticky="w")
+    out_var = tk.StringVar(value=str(dl.out_dir.resolve()))
+    ttk.Entry(bot, textvariable=out_var).grid(row=0, column=1, sticky="ew", padx=4)
+    ttk.Button(bot, text="Browse...",
+               command=lambda: out_var.set(filedialog.askdirectory(
+                   initialdir=out_var.get()) or out_var.get())
+               ).grid(row=0, column=2)
+    enh_var = tk.BooleanVar(value=dl.enhanced)
+    ttk.Checkbutton(bot, text="Enhanced narration (Fabuly only)",
+                    variable=enh_var).grid(row=0, column=3, padx=10)
+    dl_btn = ttk.Button(bot, text="Download selected")
+    dl_btn.grid(row=0, column=4)
+    bot.columnconfigure(1, weight=1)
+
+    log = ScrolledText(root, height=9, state="disabled", wrap="word")
+    log.pack(fill="both", padx=8, pady=(0, 8))
+
+    # --- behaviour -------------------------------------------------
+    def _sort_by(col: str, _flip=[False]):  # noqa: B006
+        _flip[0] = not _flip[0]
+        state["shown"].sort(key=lambda r: str(r[col]).lower(), reverse=_flip[0])
+        _fill(state["shown"])
+
+    def _fill(rows: list[dict]) -> None:
+        tree.delete(*tree.get_children())
+        for i, r in enumerate(rows[:2000]):
+            tree.insert("", "end", iid=str(i),
+                        values=(r["title"], r["author"] or "?", r["duration"],
+                                r["language"], r["source"]))
+        extra = f"  (first 2000 shown)" if len(rows) > 2000 else ""
+        status.config(text=f"{len(rows):,} of {len(state['rows']):,} books{extra}")
+
+    def _apply(*_):
+        if state["busy"] or not state["rows"]:
+            return
+        src = "" if src_var.get().startswith("all") else src_var.get()
+        lang = "" if lang_var.get().startswith("all") else lang_var.get()
+        gen = "" if genre_var.get().startswith("all") else genre_var.get()
+        rows = dl.filter_catalog(q_var.get(), source=src, language=lang, genre=gen)
+        state["shown"] = rows
+        _fill(rows)
+
+    _debounce = {"id": None}
+
+    def _on_key(*_):
+        if _debounce["id"]:
+            root.after_cancel(_debounce["id"])
+        _debounce["id"] = root.after(250, _apply)
+
+    q_entry.bind("<KeyRelease>", _on_key)
+    for cb in (src_cb, lang_cb, genre_cb):
+        cb.bind("<<ComboboxSelected>>", _apply)
+
+    def _append(kind: str, text: str) -> None:
+        log.configure(state="normal")
+        if kind == "cr":
+            log.delete("end-1l linestart", "end-1c")
+        log.insert("end", text + ("\n" if kind == "line" else ""))
+        log.see("end")
+        log.configure(state="disabled")
+
+    def _catalog_ready(rows: list[dict]) -> None:
+        state["rows"] = rows
+        lang_cb.config(values=["all languages"] +
+                       sorted({r["language"] for r in rows if r["language"]}))
+        genre_cb.config(values=["all genres"] +
+                        sorted({g.strip() for r in rows
+                                for g in r["genre"].split(";") if g.strip()}))
+        q_entry.config(state="normal")
+        _apply()
+
+    def _dl_done() -> None:
+        state["busy"] = False
+        dl_btn.config(state="normal", text="Download selected")
+
+    # Everything that touches Tk happens here, on the main thread, draining
+    # a queue that the worker threads write to (tkinter is not thread-safe).
+    def _pump():
+        try:
+            while True:
+                msg = logq.get_nowait()
+                if msg[0] == "catalog":
+                    _catalog_ready(msg[1])
+                elif msg[0] == "dl_done":
+                    _dl_done()
+                else:
+                    _append(*msg)
+        except queue.Empty:
+            pass
+        root.after(120, _pump)
+
+    def _download():
+        if state["busy"]:
+            return
+        sel = tree.selection()
+        if not sel:
+            _append("line", "Select a book in the list first.")
+            return
+        row = state["shown"][int(sel[0])]
+        state["busy"] = True
+        dl_btn.config(state="disabled", text="Downloading ...")
+        dl.out_dir = Path(out_var.get())
+        dl.enhanced = bool(enh_var.get())
+        book = dl.row_to_book(row)
+
+        def worker():
+            import contextlib
+            w = _QueueWriter(logq)
+            try:
+                with contextlib.redirect_stdout(w):
+                    dl.process(book)
+            except Exception as e:  # noqa: BLE001
+                logq.put(("line", f"ERROR: {e}"))
+            finally:
+                w.flush()
+                logq.put(("line", "-" * 40))
+                logq.put(("dl_done", None))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    dl_btn.config(command=_download)
+    tree.bind("<Double-1>", lambda _e: _download())
+
+    def _load():
+        try:
+            rows = dl.catalog  # network; this is a worker thread
+            logq.put(("catalog", rows))
+        except Exception as e:  # noqa: BLE001
+            logq.put(("line", f"Could not load catalogue: {e}"))
+
+    q_entry.config(state="disabled")
+    threading.Thread(target=_load, daemon=True).start()
+    _pump()
+    root.mainloop()
 
 
 # ---------------------------------------------------------------------------
@@ -951,10 +1313,16 @@ def main() -> None:
             pass
 
     parser = argparse.ArgumentParser(
-        description="Download classic audiobooks from Fabuly (no login needed).")
+        description="Download classic audiobooks from Fabuly (no login needed). "
+                    "With no arguments, opens a graphical browser.")
     parser.add_argument("--book", metavar="NAME",
-                        help="Book title substring, exact Fabuly slug, or "
-                             "'lv:<id>' for a LibriVox book. Omit to be prompted.")
+                        help="Book title words, exact Fabuly slug, or 'lv:<id>' "
+                             "for a LibriVox book. Omit for the text browser.")
+    parser.add_argument("--gui", action="store_true",
+                        help="Open the graphical catalogue browser (the default "
+                             "when no arguments are given)")
+    parser.add_argument("--no-gui", action="store_true",
+                        help="Force the text browser instead of the GUI")
     parser.add_argument("--out", default="./fabuly_downloads", metavar="DIR",
                         help="Output directory (default: ./fabuly_downloads)")
     parser.add_argument("--enhanced", action="store_true",
@@ -970,6 +1338,9 @@ def main() -> None:
                         help="Print the full catalogue (every downloadable book) and exit")
     parser.add_argument("--csv", metavar="FILE",
                         help="With --list: write the catalogue to a CSV file instead of printing")
+    parser.add_argument("--refresh", action="store_true",
+                        help="Rebuild the catalogue from the network, ignoring "
+                             f"the local cache ({CATALOG_CACHE.name})")
     parser.add_argument("--debug", action="store_true", help="Verbose errors")
     args = parser.parse_args()
 
@@ -980,10 +1351,22 @@ def main() -> None:
         to_mp3=args.mp3,
         want_cover=not args.no_cover,
         debug=args.debug,
+        refresh=args.refresh,
     )
+    # No CLI intent given -> graphical browser (nice for a double-clicked exe).
+    want_gui = args.gui or (not args.no_gui and not args.book
+                            and not args.list and not args.csv)
+    gui_ran = False
     try:
         if args.list or args.csv:
             dl.list_catalogue(csv_path=args.csv)
+        elif want_gui:
+            try:
+                run_gui(dl)
+                gui_ran = True
+            except Exception as e:  # noqa: BLE001 - fall back to text
+                print(f"(GUI unavailable: {e}) -- using the text browser.\n")
+                dl.browse_repl()
         else:
             dl.run(args.book)
     except KeyboardInterrupt:
@@ -992,10 +1375,11 @@ def main() -> None:
         import traceback
         traceback.print_exc()
     finally:
-        try:
-            input("\nPress Enter to exit...")
-        except EOFError:
-            pass
+        if not gui_ran:
+            try:
+                input("\nPress Enter to exit...")
+            except EOFError:
+                pass
 
 
 if __name__ == "__main__":

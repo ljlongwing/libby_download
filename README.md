@@ -44,15 +44,18 @@ This is newer and less battle-tested than the CLI tools above — if something's
 So this tool needs **no account, no browser, and no HAR capture** — it just reads public files.
 
 ```bash
+python fabuly_dl.py                              # graphical browser (default)
+python fabuly_dl.py --no-gui                     # text browser: search, pick a number
 python fabuly_dl.py --list --csv fabuly.csv      # dump the whole ~19.5k catalogue
 python fabuly_dl.py --book "moby dick"           # search across both sources -> pick
-python fabuly_dl.py --book a_christmas_carol_charles_dickens_en   # exact Fabuly slug
 python fabuly_dl.py --book lv:54                  # a specific LibriVox book id
 python fabuly_dl.py --book "Captains Courageous" --enhanced       # premium narration
 python fabuly_dl.py --book "The Viy" --mp3 --ffmpeg /path/to/ffmpeg  # transcode m4a->mp3
 ```
 
-**Browse interactively** — run with no `--book` and use the prompt: `list twain` (filters title / author / slug across both sources), then a title, a Fabuly slug, or `lv:<id>` to download. `--list --csv FILE` dumps everything (~19,500 rows) to a spreadsheet; a bare `--list` prints it all.
+**Browsing.** With no `--book`, `fabuly_dl.py` opens a **graphical browser** — a search box (matches title / author / genre / language), source / language / genre filters, a sortable table, and a Download button. `--no-gui` gives a text version: type words to search, then a number to download. `--list --csv FILE` dumps all ~19,500 rows to a spreadsheet.
+
+The merged catalogue (both sources, ~19,500 rows) is **cached at `~/.fabuly_catalog.json`** so the browser opens instantly after the first run; it refreshes itself weekly, or `--refresh` rebuilds it now. Cover art isn't fetched until you download a book (it's saved into that book's folder), so there's nothing else to cache.
 
 For each book it downloads every part (`<Book>-PartNNN.m4a` for Fabuly, `.mp3` for LibriVox) and tags them (title / author / narrator / cover art). Both sources ship **one audio file per chapter/section**, so — like Chirp, unlike Libby — the files are already split; there's no chapter step to run. The `<Book>.cue` is just a combined chapter index (same format the Java `-cue` mode accepts, if you want it).
 
@@ -197,7 +200,7 @@ Every time you run a script after that, it will:
 4. **Organizing**: It tags each chapter file with the title, author, narrator, and cover art, and writes both a `.cue` file and a plain-text chapter list.
 
 ### Fabuly
-1. **Finding the book**: For Fabuly-hosted titles it reads the public catalogue index; for LibriVox titles it reads the bundled `librivox.db` (the ~19k list the app itself ships). You pick by title, Fabuly slug, or `lv:<id>`.
+1. **Finding the book**: It merges Fabuly's public catalogue index with the bundled `librivox.db` (the ~19k list the app itself ships) into one ~19,500-title catalogue, cached locally so the browser opens instantly next time. You search it (title / author / genre / language) in the GUI or text browser and pick a book.
 2. **Downloading**: Fabuly books come from the public bucket (`--enhanced` for the premium narration); LibriVox books come from the public per-book JSON, whose section URLs point straight at archive.org. No player, no login, no capture.
 3. **Chapter titles**: For Fabuly books it parses the book's data blob (the app's read-along data); for LibriVox books the section titles are in the JSON. Both sources give one audio file per chapter/section.
 4. **Organizing**: It tags each part with title, author, narrator, and cover art. The parts are already one-per-chapter (no splitting needed), and the `.cue` it writes is just a combined chapter index.
