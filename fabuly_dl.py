@@ -19,8 +19,9 @@ What this script does:
    (Fabuly ships exactly one audio part per chapter/section).
 4. Tags each part (MP4 tags for .m4a, ID3 for .mp3) with title / author /
    narrator / track / cover art.
-5. Writes a ``<Book>.cue`` sheet in the same shape chirp_dl.py produces,
-   so LibbyDownload.jar's ``-cue`` mode can split / re-tag if desired.
+5. Writes a ``<Book>.cue`` chapter index (same shape chirp_dl.py produces).
+   The parts are already one-per-chapter, so nothing needs splitting -- the
+   .cue is just for players that show a combined chapter list.
 
 Usage:
 
@@ -259,15 +260,39 @@ def load_featured() -> list[dict]:
     return data.get("booksMetadata", [])
 
 
+_CREATORS_RAW: Optional[list[dict]] = None
+
+
+def load_creators_full() -> list[dict]:
+    """Raw creator records: {id, type: AUTHOR|NARRATOR|DESIGNER, name, ...}."""
+    global _CREATORS_RAW
+    if _CREATORS_RAW is None:
+        data = http_get_json(f"{BUCKET}/creators_metadata.json", optional=True) or {}
+        _CREATORS_RAW = data.get("creatorsMetadata", [])
+    return _CREATORS_RAW
+
+
 def load_creators() -> dict[str, str]:
     """Map creator id -> display name (authors, narrators, designers)."""
-    data = http_get_json(f"{BUCKET}/creators_metadata.json", optional=True) or {}
     return {c["id"]: c.get("name") or c["id"]
-            for c in data.get("creatorsMetadata", []) if c.get("id")}
+            for c in load_creators_full() if c.get("id")}
+
+
+# Top-level bucket prefixes that are asset/config folders, not books.
+NON_BOOK_PREFIXES = {
+    "creators", "dev", "dictionary", "featured_today", "librivox_metadata",
+    "website",
+}
 
 
 def iter_all_slugs() -> Iterable[str]:
-    """Every book slug in the bucket (the full ~20k catalogue), paginated."""
+    """Every book slug in the bucket, paginated.
+
+    The bucket is the whole downloadable catalogue -- a few hundred books,
+    not the "20,000" the marketing site cites (that number counts stream-
+    only titles that never land here).  ``books_metadata.json`` covers most
+    of them; this fills in the rest.
+    """
     token = ""
     while True:
         params = {"list-type": "2", "delimiter": "/", "max-keys": "1000"}
@@ -275,7 +300,9 @@ def iter_all_slugs() -> Iterable[str]:
             params["continuation-token"] = token
         xml = http_get(f"{BUCKET}/?{urllib.parse.urlencode(params)}").decode("utf-8")
         for pref in re.findall(r"<Prefix>([^<]+)</Prefix>", xml):
-            yield html.unescape(pref).rstrip("/")
+            slug = html.unescape(pref).rstrip("/")
+            if slug and slug not in NON_BOOK_PREFIXES:
+                yield slug
         m = re.search(r"<NextContinuationToken>([^<]+)</NextContinuationToken>", xml)
         if not m or "<IsTruncated>true</IsTruncated>" not in xml:
             break
@@ -295,14 +322,42 @@ def safe_name(text: str) -> str:
     return text[:150] or "book"
 
 
+def _deslug(s: str) -> str:
+    s = s.replace("___", ": ").replace("__", " - ").replace("_", " ")
+    return re.sub(r"\s+", " ", s).strip()
+
+
 def slug_to_title(slug: str) -> str:
     s = slug
     for suffix in ("_en_original", "_original", "_en"):
         if s.endswith(suffix):
             s = s[: -len(suffix)]
             break
-    s = s.replace("___", ": ").replace("__", " - ").replace("_", " ")
-    return re.sub(r"\s+", " ", s).strip().title()
+    return _deslug(s).title()
+
+
+def split_slug(slug: str, known_authors: Iterable[str]) -> tuple[str, str]:
+    """Best-effort (title, author) from a bucket slug.
+
+    Slugs look like ``<title_words>_<author_words>_en[_original]``.  There's
+    no delimiter between title and author, so we peel a known author name
+    off the end when we can; otherwise author is left blank.
+    """
+    s = slug
+    for suffix in ("_en_original", "_original", "_en"):
+        if s.endswith(suffix):
+            s = s[: -len(suffix)]
+            break
+    flat = _deslug(s).lower()
+    best = ""
+    for name in known_authors:
+        n = name.lower()
+        if flat.endswith(" " + n) and len(n) > len(best):
+            best = name
+    if best:
+        title = _deslug(s)[: -(len(best) + 1)].rstrip(" -:")
+        return title.title(), best
+    return _deslug(s).title(), ""
 
 
 def parse_selection(raw: str, count: int) -> Optional[list[int]]:
@@ -366,20 +421,70 @@ class FabulyDownloader:
             self._creators = load_creators()
         return self._creators
 
-    def list_catalogue(self) -> None:
-        rows = sorted(self.featured, key=lambda b: b.get("title", "").lower())
-        print(f"\n{len(rows)} curated books "
-              f"(the full bucket also holds thousands more LibriVox titles):\n")
-        for b in rows:
-            dur = b.get("durationInSeconds") or 0
-            enh = "  [enhanced]" if b.get("isEnhancedAudioAvailable") else ""
-            print(f"  {b.get('title', '?')}  -- {b.get('author', '?')}  "
-                  f"({dur // 3600}h{dur % 3600 // 60:02d}m){enh}")
-            print(f"      slug: {b.get('bookId')}")
+    def catalogue_rows(self) -> list[dict]:
+        """Every downloadable book: the curated storefront plus the handful
+        of bucket-only titles.  Rows: title, author, narrators, duration,
+        enhanced, categories, slug, source."""
+        authors = {b.get("author", "") for b in self.featured if b.get("author")}
+        authors |= {c.get("name", "") for c in
+                    (load_creators_full() or []) if c.get("type") == "AUTHOR"}
+        authors = {a for a in authors if a}
+
+        rows: dict[str, dict] = {}
+        for b in self.featured:
+            d = b.get("durationInSeconds") or 0
+            rows[b["bookId"]] = {
+                "title": b.get("title", ""),
+                "author": b.get("author", ""),
+                "narrators": "; ".join(self.creators.get(n, n.replace("_", " ").title())
+                                       for n in b.get("narratorsIds", []) or []),
+                "duration": f"{d // 3600}:{d % 3600 // 60:02d}",
+                "enhanced": "yes" if b.get("isEnhancedAudioAvailable") else "",
+                "categories": "; ".join(b.get("subCategoryIds", []) or []),
+                "slug": b["bookId"],
+                "source": "storefront",
+            }
+        print("Scanning bucket for any titles outside the storefront ...")
+        extras = [s for s in iter_all_slugs() if s not in rows]
+        if extras:
+            print(f"  {len(extras)} bucket-only titles; reading their metadata ...")
+        for slug in extras:
+            title, author = split_slug(slug, authors)
+            blob = http_get(f"{BUCKET}/{slug}/{slug}.bin", optional=True)
+            if blob:
+                bm = parse_book_bin(blob)
+                title = bm["title"] or title
+                author = bm["author"] or author
+            rows[slug] = {"title": title, "author": author, "narrators": "",
+                          "duration": "", "enhanced": "", "categories": "",
+                          "slug": slug, "source": "bucket-only"}
+        return sorted(rows.values(),
+                      key=lambda r: (r["author"].lower(), r["title"].lower()))
+
+    def list_catalogue(self, csv_path: Optional[str] = None) -> None:
+        rows = self.catalogue_rows()
+        if csv_path:
+            import csv
+            with open(csv_path, "w", newline="", encoding="utf-8") as fh:
+                w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+                w.writeheader()
+                w.writerows(rows)
+            print(f"\nWrote {len(rows)} books to {csv_path}")
+            return
+        n_extra = sum(1 for r in rows if r["source"] == "bucket-only")
+        print(f"\n{len(rows)} downloadable books "
+              f"({len(rows) - n_extra} in the storefront, {n_extra} bucket-only):\n")
+        for r in rows:
+            dur = f"  ({r['duration']})" if r["duration"] else ""
+            enh = "  [enhanced]" if r["enhanced"] else ""
+            extra = "  [bucket-only]" if r["source"] == "bucket-only" else ""
+            print(f"  {r['title']}  -- {r['author'] or '?'}{dur}{enh}{extra}")
+            print(f"      slug: {r['slug']}")
 
     def _resolve(self, query: str) -> list[dict]:
         """Return candidate book dicts: {bookId, title, author, narratorsIds?}."""
         q = query.strip().lower()
+        qn = re.sub(r"[^a-z0-9]+", "_", q).strip("_")  # "the bet, poe" -> "the_bet_poe"
 
         # 1. exact slug in the bucket
         if re.fullmatch(r"[a-z0-9_]+", q):
@@ -391,13 +496,16 @@ class FabulyDownloader:
 
         # 2. substring over curated titles / slugs
         hits = [b for b in self.featured
-                if q in b.get("title", "").lower() or q in b.get("bookId", "").lower()]
+                if q in b.get("title", "").lower()
+                or qn in b.get("bookId", "").lower()]
         if hits:
             return hits
 
-        # 3. substring over the whole bucket catalogue
+        # 3. substring over the whole bucket catalogue (match the slug and its
+        #    de-slugged title, so "the bet anton chekhov" finds the_bet_anton_chekhov)
         print("Not in the curated list; scanning the full catalogue ...")
-        wide = [slug for slug in iter_all_slugs() if q in slug.lower()]
+        wide = [slug for slug in iter_all_slugs()
+                if qn in slug.lower() or q in _deslug(slug).lower()]
         return [{"bookId": s} for s in wide]
 
     def _prompt(self, candidates: list[dict]) -> list[dict]:
@@ -541,15 +649,14 @@ class FabulyDownloader:
 
     def process(self, book: dict) -> None:
         slug = book["bookId"]
-        print(f"\n=== {book.get('title') or slug_to_title(slug)} ===")
-        print(f"    slug: {slug}")
-
         binblob = http_get(f"{BUCKET}/{slug}/{slug}.bin", optional=True)
         binmeta = parse_book_bin(binblob)
         reviews = http_get_json(f"{BUCKET}/{slug}/metadata.json", optional=True) or {}
 
         title = book.get("title") or binmeta["title"] or slug_to_title(slug)
         author = book.get("author") or binmeta["author"] or "Unknown"
+        print(f"\n=== {title} ===")
+        print(f"    slug: {slug}")
         narrator = ", ".join(
             self.creators.get(nid, nid.replace("_", " ").title())
             for nid in book.get("narratorsIds", []) or []
@@ -591,11 +698,10 @@ class FabulyDownloader:
             cue_entries.append((dest.name, chapter))
 
         self._write_cue(title, author, book_dir, cue_entries)
+        n = len(cue_entries)
         print(f"\n  Done -> {book_dir}")
-        if not self.to_mp3:
-            print("  Split into per-chapter files with LibbyDownload.jar, e.g.:")
-            print(f'    java -jar LibbyDownload.jar -cue "{book_dir / (safe_name(title) + ".cue")}" '
-                  f'-ffmpeg <ffmpeg> -c')
+        print(f"  {n} file{'s' if n != 1 else ''}, already one per chapter. "
+              f"The .cue is just a combined chapter index for players that use it.")
 
     # -- entry --------------------------------------------------------
 
@@ -637,7 +743,9 @@ def main() -> None:
                         help="Path to ffmpeg (defaults to one found on PATH)")
     parser.add_argument("--no-cover", action="store_true", help="Skip cover art")
     parser.add_argument("--list", action="store_true",
-                        help="Print the curated catalogue and exit")
+                        help="Print the full catalogue (every downloadable book) and exit")
+    parser.add_argument("--csv", metavar="FILE",
+                        help="With --list: write the catalogue to a CSV file instead of printing")
     parser.add_argument("--debug", action="store_true", help="Verbose errors")
     args = parser.parse_args()
 
@@ -650,8 +758,8 @@ def main() -> None:
         debug=args.debug,
     )
     try:
-        if args.list:
-            dl.list_catalogue()
+        if args.list or args.csv:
+            dl.list_catalogue(csv_path=args.csv)
         else:
             dl.run(args.book)
     except KeyboardInterrupt:

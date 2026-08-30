@@ -39,14 +39,17 @@ This is newer and less battle-tested than the CLI tools above — if something's
 [Fabuly](https://fabuly.io) is a free app for **public-domain** classic audiobooks (LibriVox-style recordings plus its own "enhanced" narrations). It has no DRM: every audio part is an ordinary `.m4a` file, and the entire catalogue — audio, cover art, chapter data, and the index itself — is served anonymously from a public Google Cloud Storage bucket. So this tool needs **no account, no browser automation, and no HAR capture** — it just reads the bucket.
 
 ```bash
-python fabuly_dl.py --list                      # browse the curated catalogue
+python fabuly_dl.py --list                      # list every downloadable book (~435)
+python fabuly_dl.py --list --csv fabuly.csv      # ...or dump the catalogue to CSV
 python fabuly_dl.py --book "A Christmas Carol"   # title search -> pick -> download
 python fabuly_dl.py --book a_christmas_carol_charles_dickens_en   # exact slug
 python fabuly_dl.py --book "Captains Courageous" --enhanced       # premium narration
 python fabuly_dl.py --book "The Viy" --mp3 --ffmpeg /path/to/ffmpeg  # transcode to MP3
 ```
 
-For each book it downloads every audio part (`<Book>-PartNNN.m4a`), tags them (title / author / narrator / cover art), and writes a `<Book>.cue` in the same shape `chirp_dl.py` produces — Fabuly ships one audio part per chapter, so each `FILE` gets a single `TRACK` with the real chapter title pulled from the book's data blob. Feed that `.cue` to `LibbyDownload.jar -cue … -c` if you want per-chapter files or different tagging.
+`--list` is the whole catalogue: the ~400-title storefront (`books_metadata.json`, with author / narrator / duration / genre) plus the ~35 books that exist in the bucket but aren't in the storefront yet (title and author read from each one's data blob). `--csv` writes it all to a file for grepping. Note the app's "20,000 audiobooks" marketing figure counts stream-only titles that never reach this bucket — the downloadable catalogue is a few hundred.
+
+For each book it downloads every audio part (`<Book>-PartNNN.m4a`) and tags them (title / author / narrator / cover art). Fabuly ships **one audio part per chapter**, so — like Chirp, and unlike Libby — the files are already split; there's no chapter step to run. The `<Book>.cue` it also writes is just a combined chapter index for players that read one (same format the Java `-cue` mode accepts, if you ever want it).
 
 Only dependency is `mutagen`. `ffmpeg` is optional and only used by `--mp3`.
 
@@ -192,4 +195,4 @@ Every time you run a script after that, it will:
 1. **Reading the catalogue**: The tool downloads Fabuly's public catalogue index and finds the book you named (by title, or by its exact bucket slug).
 2. **Downloading**: It reads the book's folder in the public bucket and pulls every audio part directly — no player, no login, no capture. `--enhanced` grabs the premium narration instead.
 3. **Chapter titles**: It parses the book's data blob (the same one the app uses for read-along) to recover real chapter names. Fabuly stores one audio part per chapter, so parts and chapters line up 1:1.
-4. **Organizing**: It tags each part with title, author, narrator, and cover art, and writes a `.cue` (one `FILE` per part) that `LibbyDownload.jar -cue` can consume for splitting or re-tagging.
+4. **Organizing**: It tags each part with title, author, narrator, and cover art. The parts are already one-per-chapter (no splitting needed), and the `.cue` it writes is just a combined chapter index.
