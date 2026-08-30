@@ -49,6 +49,8 @@ python fabuly_dl.py --book "The Viy" --mp3 --ffmpeg /path/to/ffmpeg  # transcode
 
 `--list` is the whole catalogue: the ~400-title storefront (`books_metadata.json`, with author / narrator / duration / genre) plus the ~35 books that exist in the bucket but aren't in the storefront yet (title and author read from each one's data blob). `--csv` writes it all to a file for grepping. Note the app's "20,000 audiobooks" marketing figure counts stream-only titles that never reach this bucket — the downloadable catalogue is a few hundred.
 
+Or **run it with no `--book` and browse from the prompt**: type `list` for the whole catalogue, `list twain` to filter by title/author/slug, then a title or slug to download — all in one session, without re-running the tool.
+
 For each book it downloads every audio part (`<Book>-PartNNN.m4a`) and tags them (title / author / narrator / cover art). Fabuly ships **one audio part per chapter**, so — like Chirp, and unlike Libby — the files are already split; there's no chapter step to run. The `<Book>.cue` it also writes is just a combined chapter index for players that read one (same format the Java `-cue` mode accepts, if you ever want it).
 
 Only dependency is `mutagen`. `ffmpeg` is optional and only used by `--mp3`.

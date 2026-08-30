@@ -25,10 +25,15 @@ What this script does:
 
 Usage:
 
-    python fabuly_dl.py --list
+    python fabuly_dl.py                       # then: list / list <term> / a title
+    python fabuly_dl.py --list                # print the whole catalogue and exit
+    python fabuly_dl.py --list --csv out.csv  # ...or dump it to a file
     python fabuly_dl.py --book "Captains Courageous"
     python fabuly_dl.py --book _the_viy_nicholas_gogol_en --enhanced
     python fabuly_dl.py --book "A Christmas Carol" --mp3 --ffmpeg C:\\ffmpeg\\bin\\ffmpeg.exe
+
+Run with no --book to get an interactive prompt: type ``list`` to see every
+title, ``list twain`` to filter, or a title/slug to download it.
 
 Only third-party dependency is ``mutagen``.  ``ffmpeg`` is optional and
 only needed for ``--mp3``.
@@ -402,6 +407,7 @@ class FabulyDownloader:
         self.debug = debug
         self._featured: Optional[list[dict]] = None
         self._creators: Optional[dict[str, str]] = None
+        self._catalog: Optional[list[dict]] = None
 
         if self.to_mp3 and not self.ffmpeg:
             sys.exit("--mp3 needs ffmpeg; pass --ffmpeg PATH or put ffmpeg on PATH.")
@@ -461,8 +467,23 @@ class FabulyDownloader:
         return sorted(rows.values(),
                       key=lambda r: (r["author"].lower(), r["title"].lower()))
 
+    @property
+    def catalog(self) -> list[dict]:
+        """Cached full catalogue (built once per run)."""
+        if self._catalog is None:
+            self._catalog = self.catalogue_rows()
+        return self._catalog
+
+    @staticmethod
+    def _print_row(r: dict) -> None:
+        dur = f"  ({r['duration']})" if r["duration"] else ""
+        enh = "  [enhanced]" if r["enhanced"] else ""
+        extra = "  [bucket-only]" if r["source"] == "bucket-only" else ""
+        print(f"  {r['title']}  -- {r['author'] or '?'}{dur}{enh}{extra}")
+        print(f"      slug: {r['slug']}")
+
     def list_catalogue(self, csv_path: Optional[str] = None) -> None:
-        rows = self.catalogue_rows()
+        rows = self.catalog
         if csv_path:
             import csv
             with open(csv_path, "w", newline="", encoding="utf-8") as fh:
@@ -475,11 +496,26 @@ class FabulyDownloader:
         print(f"\n{len(rows)} downloadable books "
               f"({len(rows) - n_extra} in the storefront, {n_extra} bucket-only):\n")
         for r in rows:
-            dur = f"  ({r['duration']})" if r["duration"] else ""
-            enh = "  [enhanced]" if r["enhanced"] else ""
-            extra = "  [bucket-only]" if r["source"] == "bucket-only" else ""
-            print(f"  {r['title']}  -- {r['author'] or '?'}{dur}{enh}{extra}")
-            print(f"      slug: {r['slug']}")
+            self._print_row(r)
+
+    def _browse(self, term: str = "") -> None:
+        """Interactive catalogue view, optionally filtered by ``term``."""
+        rows = self.catalog
+        t = term.strip().lower()
+        if t:
+            tn = re.sub(r"[^a-z0-9]+", "_", t).strip("_")
+            rows = [r for r in rows
+                    if t in r["title"].lower() or t in r["author"].lower()
+                    or t in r["slug"].lower() or tn in r["slug"].lower()
+                    or t in _deslug(r["slug"]).lower()]
+        if not rows:
+            print(f"  nothing matches {term!r}")
+            return
+        for r in rows:
+            self._print_row(r)
+        tail = f" matching {term!r}" if term else ""
+        print(f"\n  {len(rows)} title(s){tail}. "
+              f"Type a title or slug to download, or 'list <term>' to filter.")
 
     def _resolve(self, query: str) -> list[dict]:
         """Return candidate book dicts: {bookId, title, author, narratorsIds?}."""
@@ -707,9 +743,20 @@ class FabulyDownloader:
 
     def run(self, query: Optional[str]) -> None:
         if not query:
-            query = input("Book title or slug: ").strip()
-        if not query:
-            sys.exit("No book given.")
+            print("Enter a book title or slug to download.  Or browse first:")
+            print("    list            every downloadable title (~435)")
+            print("    list <term>     titles matching <term>  (e.g. 'list twain')")
+            print("    q               quit")
+        while not query:
+            raw = input("\nfabuly> ").strip()
+            head = raw.split(None, 1)[0].lower() if raw else ""
+            if head in ("q", "quit", "exit"):
+                return
+            if head in ("list", "l", "ls", "?"):
+                term = raw.split(None, 1)[1] if len(raw.split(None, 1)) > 1 else ""
+                self._browse(term)
+                continue
+            query = raw
         candidates = self._resolve(query)
         if not candidates:
             sys.exit(f"No book matched {query!r}.")
@@ -728,6 +775,14 @@ class FabulyDownloader:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    # Book titles carry curly quotes / accents; a cp1252 console would crash
+    # on print().  Fall back to replacement chars instead.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            pass
+
     parser = argparse.ArgumentParser(
         description="Download classic audiobooks from Fabuly (no login needed).")
     parser.add_argument("--book", metavar="NAME",
