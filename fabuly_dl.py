@@ -44,7 +44,9 @@ Usage:
 With no --book you get the GUI (or, with --no-gui, a text browser that
 searches title/author/genre/language and downloads by number).  The merged
 catalogue is cached at ~/.fabuly_catalog.json for a week; --refresh rebuilds
-it.
+it.  --template / the GUI "Folder" field controls the sub-folder layout,
+e.g. --template "{author}/{title}"  (tokens: title author author_initial
+genre language source narrator slug).
 
 Third-party dependency: ``mutagen`` (``ffmpeg`` optional, only for --mp3;
 ``tkinter`` is stdlib and only needed for the GUI).  ``librivox.db`` must sit
@@ -431,6 +433,46 @@ def safe_name(text: str) -> str:
     return text[:150] or "book"
 
 
+TEMPLATE_TOKENS = ("title", "author", "author_initial", "genre", "language",
+                   "source", "narrator", "slug")
+_TOKEN_RE = re.compile(r"\{(\w+)\}")
+
+
+def render_path_template(template: str, meta: dict) -> Path:
+    """Turn a folder template like ``{author}/{title}`` into a relative Path.
+
+    Tokens come from ``meta`` (each value is sanitised).  ``/`` and ``\\``
+    split into sub-folders.  A path segment that renders empty (e.g.
+    ``{genre}`` for a LibriVox book) is dropped rather than left blank.
+    """
+    author = str(meta.get("author") or "")
+    tokens = {
+        "title": str(meta.get("title") or ""),
+        "author": author,
+        "author_initial": next((c.upper() for c in author if c.isalpha()), "#"),
+        "genre": str(meta.get("genre") or "").split(";")[0].strip(),
+        "language": str(meta.get("language") or ""),
+        "source": str(meta.get("source") or ""),
+        "narrator": str(meta.get("narrators") or meta.get("narrator") or "")
+                    .split(";")[0].strip(),
+        "slug": str(meta.get("slug") or meta.get("bookId")
+                    or (f"lv{meta['librivox_id']}" if "librivox_id" in meta else "")),
+    }
+    def _san(s: str) -> str:  # like safe_name but no "book" fallback
+        s = _UNSAFE.sub("", s or "").strip().strip(".")
+        return re.sub(r"\s+", " ", s)[:150]
+
+    segments = []
+    for seg in re.split(r"[\\/]+", template.strip()):
+        rendered = _TOKEN_RE.sub(lambda m: tokens.get(m.group(1), m.group(0)), seg)
+        clean = _san(rendered)
+        if clean:
+            segments.append(clean)
+    if not segments:
+        segments = [_san(tokens["title"]) or "book"]
+    return Path(*segments)
+
+
 def _deslug(s: str) -> str:
     s = s.replace("___", ": ").replace("__", " - ").replace("_", " ")
     return re.sub(r"\s+", " ", s).strip()
@@ -503,7 +545,7 @@ class FabulyDownloader:
     def __init__(self, out_dir: str, *, ffmpeg: Optional[str] = None,
                  enhanced: bool = False, to_mp3: bool = False,
                  want_cover: bool = True, debug: bool = False,
-                 refresh: bool = False) -> None:
+                 refresh: bool = False, path_template: str = "{title}") -> None:
         self.out_dir = Path(out_dir)
         self.ffmpeg = ffmpeg or shutil.which("ffmpeg")
         self.enhanced = enhanced
@@ -511,6 +553,7 @@ class FabulyDownloader:
         self.want_cover = want_cover
         self.debug = debug
         self.refresh = refresh
+        self.path_template = path_template or "{title}"
         self._featured: Optional[list[dict]] = None
         self._creators: Optional[dict[str, str]] = None
         self._catalog: Optional[list[dict]] = None
@@ -680,12 +723,15 @@ class FabulyDownloader:
 
     @staticmethod
     def row_to_book(row: dict) -> dict:
-        """Catalogue row -> a book dict process() understands."""
+        """Catalogue row -> a book dict process() understands.  Carries the
+        extra metadata so folder templates can use {genre} etc."""
+        meta = {k: row.get(k, "") for k in
+                ("title", "author", "genre", "language", "narrators", "source")}
         if row["slug"].startswith("lv:"):
-            return {"librivox_id": int(row["slug"][3:]),
-                    "title": row["title"], "author": row["author"]}
-        return {"bookId": row["slug"], "title": row["title"],
-                "author": row["author"]}
+            meta["librivox_id"] = int(row["slug"][3:])
+        else:
+            meta["bookId"] = row["slug"]
+        return meta
 
     def _resolve(self, query: str) -> list[dict]:
         """Return candidate book dicts.  A Fabuly book carries ``bookId``;
@@ -886,8 +932,12 @@ class FabulyDownloader:
         print(f"\n=== {title} ===")
         print(f"    LibriVox id {lid} -- {len(secs)} section(s), audio from archive.org")
 
-        book_dir = self.out_dir / safe_name(title)
+        book_dir = self.out_dir / render_path_template(
+            self.path_template,
+            {**book, "title": title, "author": author, "slug": f"lv:{lid}",
+             "source": "librivox"})
         book_dir.mkdir(parents=True, exist_ok=True)
+        print(f"    -> {book_dir}")
         cover = self._fetch_librivox_cover(secs, book_dir)
 
         cue_entries: list[tuple[str, str]] = []
@@ -955,7 +1005,7 @@ class FabulyDownloader:
         narrator = ", ".join(
             self.creators.get(nid, nid.replace("_", " ").title())
             for nid in book.get("narratorsIds", []) or []
-        )
+        ) or (book.get("narrators") or "")
         summary = (reviews.get("summary") or "").strip()
 
         parts = self._discover_parts(slug)
@@ -970,8 +1020,12 @@ class FabulyDownloader:
             print(f"  Note: {len(sections)} chapters but {len(parts)} parts -- "
                   f"titles past the overlap fall back to 'Part N'.")
 
-        book_dir = self.out_dir / safe_name(title)
+        book_dir = self.out_dir / render_path_template(
+            self.path_template,
+            {**book, "title": title, "author": author, "slug": slug,
+             "narrators": narrator, "source": book.get("source", "storefront")})
         book_dir.mkdir(parents=True, exist_ok=True)
+        print(f"    -> {book_dir}")
         cover = self._fetch_cover(slug, book_dir)
 
         cue_entries: list[tuple[str, str]] = []
@@ -1177,6 +1231,20 @@ def run_gui(dl: "FabulyDownloader") -> None:
     dl_btn.grid(row=0, column=4)
     bot.columnconfigure(1, weight=1)
 
+    ttk.Label(bot, text="Folder").grid(row=1, column=0, sticky="w", pady=(6, 0))
+    tmpl_var = tk.StringVar(value=dl.path_template)
+    tmpl_cb = ttk.Combobox(bot, textvariable=tmpl_var, values=[
+        "{title}",
+        "{author}/{title}",
+        "{author_initial}/{author}/{title}",
+        "{source}/{author}/{title}",
+        "{language}/{author}/{title}",
+        "{genre}/{title}",
+    ])
+    tmpl_cb.grid(row=1, column=1, columnspan=2, sticky="ew", padx=4, pady=(6, 0))
+    ttk.Label(bot, text="tokens: " + "  ".join("{%s}" % t for t in TEMPLATE_TOKENS),
+              foreground="#888").grid(row=2, column=1, columnspan=4, sticky="w")
+
     log = ScrolledText(root, height=9, state="disabled", wrap="word")
     log.pack(fill="both", padx=8, pady=(0, 8))
 
@@ -1266,6 +1334,7 @@ def run_gui(dl: "FabulyDownloader") -> None:
         dl_btn.config(state="disabled", text="Downloading ...")
         dl.out_dir = Path(out_var.get())
         dl.enhanced = bool(enh_var.get())
+        dl.path_template = tmpl_var.get().strip() or "{title}"
         book = dl.row_to_book(row)
 
         def worker():
@@ -1325,6 +1394,10 @@ def main() -> None:
                         help="Force the text browser instead of the GUI")
     parser.add_argument("--out", default="./fabuly_downloads", metavar="DIR",
                         help="Output directory (default: ./fabuly_downloads)")
+    parser.add_argument("--template", default="{title}", metavar="TMPL",
+                        help="Sub-folder layout under --out. Tokens: "
+                             + " ".join("{%s}" % t for t in TEMPLATE_TOKENS)
+                             + "  (default: {title}; e.g. \"{author}/{title}\")")
     parser.add_argument("--enhanced", action="store_true",
                         help="Fabuly books: grab the premium 'enhanced' narration "
                              "when available (no effect on LibriVox books)")
@@ -1352,6 +1425,7 @@ def main() -> None:
         want_cover=not args.no_cover,
         debug=args.debug,
         refresh=args.refresh,
+        path_template=args.template,
     )
     # No CLI intent given -> graphical browser (nice for a double-clicked exe).
     want_gui = args.gui or (not args.no_gui and not args.book

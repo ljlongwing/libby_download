@@ -55,6 +55,15 @@ python fabuly_dl.py --book "The Viy" --mp3 --ffmpeg /path/to/ffmpeg  # transcode
 
 **Browsing.** With no `--book`, `fabuly_dl.py` opens a **graphical browser** — a search box (matches title / author / genre / language), source / language / genre filters, a sortable table, and a Download button. `--no-gui` gives a text version: type words to search, then a number to download. `--list --csv FILE` dumps all ~19,500 rows to a spreadsheet.
 
+**Folder layout.** By default each book lands in `<out>/<Title>/`. Change that with a template — the GUI has a "Folder" field (with presets), or `--template` on the CLI:
+
+```bash
+python fabuly_dl.py --book "moby dick" --template "{author}/{title}"
+python fabuly_dl.py --template "{source}/{author_initial}/{author}/{title}"
+```
+
+Tokens: `{title}` `{author}` `{author_initial}` `{genre}` `{language}` `{source}` `{narrator}` `{slug}`. `/` makes sub-folders; a token that's empty for a given book (e.g. `{genre}` on a LibriVox title) just drops that folder level.
+
 The merged catalogue (both sources, ~19,500 rows) is **cached at `~/.fabuly_catalog.json`** so the browser opens instantly after the first run; it refreshes itself weekly, or `--refresh` rebuilds it now. Cover art isn't fetched until you download a book (it's saved into that book's folder), so there's nothing else to cache.
 
 For each book it downloads every part (`<Book>-PartNNN.m4a` for Fabuly, `.mp3` for LibriVox) and tags them (title / author / narrator / cover art). Both sources ship **one audio file per chapter/section**, so — like Chirp, unlike Libby — the files are already split; there's no chapter step to run. The `<Book>.cue` is just a combined chapter index (same format the Java `-cue` mode accepts, if you want it).
