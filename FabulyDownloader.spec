@@ -9,7 +9,8 @@ a = Analysis(
     ['fabuly_dl.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    # LibriVox catalogue (~19k titles) -- read at runtime from next to the exe.
+    datas=[('librivox.db', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

@@ -4,7 +4,7 @@ This repo contains a few related, standalone tools that are provided for **educa
 
 *   **`libby_dl.py`** — downloads your borrowed audiobooks from **Libby** (libbyapp.com).
 *   **`chirp_dl.py`** — downloads your purchased audiobooks from **Chirp Books** (chirpbooks.com).
-*   **`fabuly_dl.py`** — downloads public-domain classic audiobooks from **Fabuly** (fabuly.io). No login, no browser — Fabuly serves its whole catalogue as plain files from a public bucket.
+*   **`fabuly_dl.py`** — downloads public-domain classic audiobooks from **Fabuly** (fabuly.io): ~435 Fabuly-hosted titles plus the ~19k LibriVox catalogue it bundles (audio streamed from archive.org). No login, no browser, no DRM — everything is public files.
 *   **`service/`** — an optional self-hosted web service that runs the Libby and Chirp tools automatically on a schedule (see below), so borrowing a book in Libby or owning one on Chirp gets it downloaded without you running anything by hand.
 
 ### 🐳 Automated download service (Docker)
@@ -36,24 +36,27 @@ This is newer and less battle-tested than the CLI tools above — if something's
 
 ### 📚 Fabuly (`fabuly_dl.py`)
 
-[Fabuly](https://fabuly.io) is a free app for **public-domain** classic audiobooks (LibriVox-style recordings plus its own "enhanced" narrations). It has no DRM: every audio part is an ordinary `.m4a` file, and the entire catalogue — audio, cover art, chapter data, and the index itself — is served anonymously from a public Google Cloud Storage bucket. So this tool needs **no account, no browser automation, and no HAR capture** — it just reads the bucket.
+[Fabuly](https://fabuly.io) is a free app for **public-domain** classic audiobooks. It has no DRM anywhere, and draws on two fully public sources:
+
+- **Fabuly-hosted (~435 books)** — curated classics, "Fabuly Originals", and AI-"enhanced" narrations. Audio (`.m4a`) and all metadata sit in a world-readable Google Cloud Storage bucket.
+- **LibriVox (~19,000 books — the app's "20,000" figure)** — the catalogue ships *inside the APK* as `librivox.db` (bundled here as `librivox.db`); per-book section lists are public JSON in the same bucket; the audio is plain 64 kbps MP3 served straight from **archive.org**.
+
+So this tool needs **no account, no browser, and no HAR capture** — it just reads public files.
 
 ```bash
-python fabuly_dl.py --list                      # list every downloadable book (~435)
-python fabuly_dl.py --list --csv fabuly.csv      # ...or dump the catalogue to CSV
-python fabuly_dl.py --book "A Christmas Carol"   # title search -> pick -> download
-python fabuly_dl.py --book a_christmas_carol_charles_dickens_en   # exact slug
+python fabuly_dl.py --list --csv fabuly.csv      # dump the whole ~19.5k catalogue
+python fabuly_dl.py --book "moby dick"           # search across both sources -> pick
+python fabuly_dl.py --book a_christmas_carol_charles_dickens_en   # exact Fabuly slug
+python fabuly_dl.py --book lv:54                  # a specific LibriVox book id
 python fabuly_dl.py --book "Captains Courageous" --enhanced       # premium narration
-python fabuly_dl.py --book "The Viy" --mp3 --ffmpeg /path/to/ffmpeg  # transcode to MP3
+python fabuly_dl.py --book "The Viy" --mp3 --ffmpeg /path/to/ffmpeg  # transcode m4a->mp3
 ```
 
-`--list` is the whole catalogue: the ~400-title storefront (`books_metadata.json`, with author / narrator / duration / genre) plus the ~35 books that exist in the bucket but aren't in the storefront yet (title and author read from each one's data blob). `--csv` writes it all to a file for grepping. Note the app's "20,000 audiobooks" marketing figure counts stream-only titles that never reach this bucket — the downloadable catalogue is a few hundred.
+**Browse interactively** — run with no `--book` and use the prompt: `list twain` (filters title / author / slug across both sources), then a title, a Fabuly slug, or `lv:<id>` to download. `--list --csv FILE` dumps everything (~19,500 rows) to a spreadsheet; a bare `--list` prints it all.
 
-Or **run it with no `--book` and browse from the prompt**: type `list` for the whole catalogue, `list twain` to filter by title/author/slug, then a title or slug to download — all in one session, without re-running the tool.
+For each book it downloads every part (`<Book>-PartNNN.m4a` for Fabuly, `.mp3` for LibriVox) and tags them (title / author / narrator / cover art). Both sources ship **one audio file per chapter/section**, so — like Chirp, unlike Libby — the files are already split; there's no chapter step to run. The `<Book>.cue` is just a combined chapter index (same format the Java `-cue` mode accepts, if you want it).
 
-For each book it downloads every audio part (`<Book>-PartNNN.m4a`) and tags them (title / author / narrator / cover art). Fabuly ships **one audio part per chapter**, so — like Chirp, and unlike Libby — the files are already split; there's no chapter step to run. The `<Book>.cue` it also writes is just a combined chapter index for players that read one (same format the Java `-cue` mode accepts, if you ever want it).
-
-Only dependency is `mutagen`. `ffmpeg` is optional and only used by `--mp3`.
+Dependencies: `mutagen`, plus the bundled `librivox.db` for LibriVox titles. `ffmpeg` is optional (only `--mp3`).
 
 ### 🔒 Why isn't there a Hoopla downloader?
 Hoopla's audiobooks *and* video both stream through **Widevine/PlayReady DRM** (via castLabs DRMtoday — confirmed by inspecting the DASH manifest: `ContentProtection` / `cenc:default_KID` elements and real Widevine/PlayReady license requests to `patron-api-gateway.hoopladigital.com`). That's genuine content encryption, not just an access-token quirk like the ones these tools work around for Libby/Chirp, so building a downloader for it would mean circumventing DRM — illegal under DMCA §1201 regardless of having a valid loan. This isn't going to change, so there's no need to re-investigate it.
@@ -194,7 +197,7 @@ Every time you run a script after that, it will:
 4. **Organizing**: It tags each chapter file with the title, author, narrator, and cover art, and writes both a `.cue` file and a plain-text chapter list.
 
 ### Fabuly
-1. **Reading the catalogue**: The tool downloads Fabuly's public catalogue index and finds the book you named (by title, or by its exact bucket slug).
-2. **Downloading**: It reads the book's folder in the public bucket and pulls every audio part directly — no player, no login, no capture. `--enhanced` grabs the premium narration instead.
-3. **Chapter titles**: It parses the book's data blob (the same one the app uses for read-along) to recover real chapter names. Fabuly stores one audio part per chapter, so parts and chapters line up 1:1.
+1. **Finding the book**: For Fabuly-hosted titles it reads the public catalogue index; for LibriVox titles it reads the bundled `librivox.db` (the ~19k list the app itself ships). You pick by title, Fabuly slug, or `lv:<id>`.
+2. **Downloading**: Fabuly books come from the public bucket (`--enhanced` for the premium narration); LibriVox books come from the public per-book JSON, whose section URLs point straight at archive.org. No player, no login, no capture.
+3. **Chapter titles**: For Fabuly books it parses the book's data blob (the app's read-along data); for LibriVox books the section titles are in the JSON. Both sources give one audio file per chapter/section.
 4. **Organizing**: It tags each part with title, author, narrator, and cover art. The parts are already one-per-chapter (no splitting needed), and the `.cue` it writes is just a combined chapter index.
