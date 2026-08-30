@@ -53,7 +53,7 @@ python fabuly_dl.py --book "Captains Courageous" --enhanced       # premium narr
 python fabuly_dl.py --book "The Viy" --mp3 --ffmpeg /path/to/ffmpeg  # transcode m4a->mp3
 ```
 
-**Browsing.** With no `--book`, `fabuly_dl.py` opens a **graphical browser** — a search box (matches title / author / genre / language), source / language / genre filters, a sortable table, and a Download button. `--no-gui` gives a text version: type words to search, then a number to download. `--list --csv FILE` dumps all ~19,500 rows to a spreadsheet.
+**Browsing.** With no `--book`, `fabuly_dl.py` opens a **graphical browser** — a search box (matches title / author / genre / language), source / language / genre filters, a sortable table, and a Download button. Select several rows (Ctrl-click / Shift-click) to queue a batch. `--no-gui` gives a text version: type words to search, then a number to download — or `1,4,7` / `2-6` / `all` for several. `--list --csv FILE` dumps all ~19,500 rows to a spreadsheet.
 
 **Folder layout.** By default each book lands in `<out>/<Title>/`. Change that with a template — the GUI has a "Folder" field (with presets), or `--template` on the CLI:
 

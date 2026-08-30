@@ -1080,7 +1080,8 @@ class FabulyDownloader:
               f"({len(self.catalog):,} books, Fabuly + LibriVox).")
         print("Search matches title, author, genre, language.  Examples:")
         print("    sherlock holmes        dickens        twain ghost")
-        print("Then type the number of a book to download it.  'q' to quit.\n")
+        print("Then type a number to download -- or several: 1,4,7  or  2-6  or  all.")
+        print("'q' to quit.\n")
         results: list[dict] = []
         while True:
             try:
@@ -1091,12 +1092,13 @@ class FabulyDownloader:
                 return
             if not raw:
                 continue
-            if raw.isdigit() and results:
-                i = int(raw)
-                if 1 <= i <= len(results):
-                    self._download_books([self.row_to_book(results[i - 1])])
+            if results and re.fullmatch(r"(all|\*|[\d,\s-]+)", raw.lower()):
+                idx = parse_selection(raw, len(results))
+                if idx:
+                    self._download_books(
+                        [self.row_to_book(results[i]) for i in idx])
                 else:
-                    print(f"  no #{i} in the list above (1-{len(results)})")
+                    print(f"  nothing valid in {raw!r} (list is 1-{len(results)})")
                 continue
             # explicit slug / lv:id still works
             if re.fullmatch(r"(?:lv[:#]?|#)\d{1,7}|[a-z0-9_]{6,}", raw):
@@ -1199,7 +1201,7 @@ def run_gui(dl: "FabulyDownloader") -> None:
     mid = ttk.Frame(root, padding=(8, 0))
     mid.pack(fill="both", expand=True)
     cols = ("title", "author", "duration", "language", "source")
-    tree = ttk.Treeview(mid, columns=cols, show="headings", selectmode="browse")
+    tree = ttk.Treeview(mid, columns=cols, show="headings", selectmode="extended")
     widths = {"title": 420, "author": 220, "duration": 70, "language": 90,
               "source": 90}
     for c in cols:
@@ -1304,7 +1306,8 @@ def run_gui(dl: "FabulyDownloader") -> None:
 
     def _dl_done() -> None:
         state["busy"] = False
-        dl_btn.config(state="normal", text="Download selected")
+        dl_btn.config(state="normal")
+        _selection_count()
 
     # Everything that touches Tk happens here, on the main thread, draining
     # a queue that the worker threads write to (tkinter is not thread-safe).
@@ -1316,44 +1319,57 @@ def run_gui(dl: "FabulyDownloader") -> None:
                     _catalog_ready(msg[1])
                 elif msg[0] == "dl_done":
                     _dl_done()
+                elif msg[0] == "btn":
+                    dl_btn.config(text=msg[1])
                 else:
                     _append(*msg)
         except queue.Empty:
             pass
         root.after(120, _pump)
 
-    def _download():
+    def _selection_count(*_):
+        n = len(tree.selection())
+        dl_btn.config(text=f"Download {n} selected" if n > 1 else "Download selected")
+
+    tree.bind("<<TreeviewSelect>>", _selection_count)
+
+    def _download(only_iid: Optional[str] = None):
         if state["busy"]:
             return
-        sel = tree.selection()
-        if not sel:
-            _append("line", "Select a book in the list first.")
+        iids = (only_iid,) if only_iid else tree.selection()
+        if not iids:
+            _append("line", "Select one or more books in the list first "
+                            "(Ctrl-click / Shift-click for several).")
             return
-        row = state["shown"][int(sel[0])]
+        rows = [state["shown"][int(i)] for i in iids]
         state["busy"] = True
-        dl_btn.config(state="disabled", text="Downloading ...")
+        dl_btn.config(state="disabled",
+                      text=f"Downloading 1/{len(rows)} ...")
         dl.out_dir = Path(out_var.get())
         dl.enhanced = bool(enh_var.get())
         dl.path_template = tmpl_var.get().strip() or "{title}"
-        book = dl.row_to_book(row)
 
         def worker():
             import contextlib
             w = _QueueWriter(logq)
-            try:
-                with contextlib.redirect_stdout(w):
-                    dl.process(book)
-            except Exception as e:  # noqa: BLE001
-                logq.put(("line", f"ERROR: {e}"))
-            finally:
-                w.flush()
-                logq.put(("line", "-" * 40))
-                logq.put(("dl_done", None))
+            for k, row in enumerate(rows, 1):
+                logq.put(("btn", f"Downloading {k}/{len(rows)} ..."))
+                if len(rows) > 1:
+                    logq.put(("line", f"===== [{k}/{len(rows)}] {row['title']} ====="))
+                try:
+                    with contextlib.redirect_stdout(w):
+                        dl.process(dl.row_to_book(row))
+                except Exception as e:  # noqa: BLE001
+                    logq.put(("line", f"ERROR ({row['title']}): {e}"))
+            w.flush()
+            logq.put(("line", f"--- finished {len(rows)} book(s) ---"))
+            logq.put(("dl_done", None))
 
         threading.Thread(target=worker, daemon=True).start()
 
     dl_btn.config(command=_download)
-    tree.bind("<Double-1>", lambda _e: _download())
+    tree.bind("<Double-1>", lambda _e: _download(
+        tree.identify_row(_e.y) or None))
 
     def _load():
         try:
