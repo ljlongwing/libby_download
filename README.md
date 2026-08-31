@@ -65,8 +65,8 @@ python fabuly_dl.py --template "{source}/{author_initial}/{author}/{title}"
 Tokens: `{title}` `{author}` `{author_initial}` `{year}` `{decade}` `{genre}` `{language}` `{source}` `{narrator}` `{slug}`. `/` makes sub-folders; a token that's empty for a given book just drops that folder level.
 
 **Year & genre.** These come from a metadata set that's **baked into the tool** — no lookups at download time:
-- LibriVox books (~19k): year and genre from LibriVox's own API (`copyright_year` is the original text's year, not the recording), harvested once into `librivox.db`'s `year`/`genre` columns. ~99% have a year.
-- Fabuly-hosted books (~435): `first_publish_year` and subjects from [Open Library](https://openlibrary.org), harvested into the bundled `fabuly_meta.json`. ~60% match (the rest are obscure short stories); this is an *edition* year, so treat it as approximate.
+- LibriVox books (~19k): year and genre from LibriVox's own API (`copyright_year` is the original text's year, not the recording), harvested once into `librivox.db`'s `year`/`genre` columns — **~88% have a year, ~98% a genre**. The rest have no year upstream (poetry anthologies, non-book recordings).
+- Fabuly-hosted books (~435): year cross-matched to LibriVox's curated `copyright_year` where possible, else [Open Library](https://openlibrary.org)'s `first_publish_year` (kept only if pre-1930, since Open Library often returns a modern reprint year). ~63% get a trustworthy year, in the bundled `fabuly_meta.json`.
 
 They fill the GUI's Year/Genre columns, the `{year}`/`{decade}` template tokens, and the ID3/MP4 year+genre tags on every downloaded file. The one-off harvest/bake scripts live in `scripts/fabuly_metadata/` if the catalogues drift and it needs regenerating.
 

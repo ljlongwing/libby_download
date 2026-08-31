@@ -9,7 +9,7 @@
 import json, os, re, sqlite3
 
 HERE = os.path.dirname(__file__)
-REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
+REPO = "C:/Users/ljlon/Nextcloud/MyStuph/workspace/libby-download"
 LV_META = json.load(open(os.path.join(HERE, "librivox_meta.json")))
 OL_META = json.load(open(os.path.join(HERE, "fabuly_meta.json")))
 DB = os.path.join(REPO, "librivox.db")
@@ -29,13 +29,26 @@ def to_year(v):
     if not m:
         return None
     y = int(m.group())
-    return y if 1450 <= y <= 2025 else None
+    return y if 1000 <= y <= 2025 else None
 
 db_rows = {r[0]: (r[1], r[2]) for r in con.execute("SELECT id,title,author FROM book")}
+ol_year = {}
+_olp = os.path.join(HERE, "lv_year_ol.json")
+if os.path.exists(_olp):
+    ol_year = {int(k): v for k, v in json.load(open(_olp)).items() if v}
+n_ol = 0
 for bid, m in lv_meta.items():
     y = to_year(m.get("year"))
+    if y is None and bid in ol_year:
+        y = ol_year[bid]; n_ol += 1
     g = "; ".join(dict.fromkeys(m.get("genres") or []))[:200] or None
     con.execute("UPDATE book SET year=?, genre=? WHERE id=?", (y, g, bid))
+# also cover ids that are in the db + ol_year but never made it into lv_meta
+for bid, y in ol_year.items():
+    if bid not in lv_meta:
+        con.execute("UPDATE book SET year=COALESCE(year,?) WHERE id=?", (y, bid))
+        n_ol += 1
+print(f"  (+{n_ol} years from Open Library fallback)")
 con.commit()
 hy = con.execute("SELECT COUNT(*) FROM book WHERE year IS NOT NULL").fetchone()[0]
 hg = con.execute("SELECT COUNT(*) FROM book WHERE genre IS NOT NULL").fetchone()[0]
