@@ -9,8 +9,10 @@ a = Analysis(
     ['fabuly_dl.py'],
     pathex=[],
     binaries=[],
-    # LibriVox catalogue (~19k titles) -- read at runtime from next to the exe.
-    datas=[('librivox.db', '.')],
+    # Baked-in metadata read at runtime from next to the exe:
+    #   librivox.db      -- ~19k LibriVox titles (+ year/genre columns)
+    #   fabuly_meta.json -- Open Library year/subjects for the ~435 Fabuly books
+    datas=[('librivox.db', '.'), ('fabuly_meta.json', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

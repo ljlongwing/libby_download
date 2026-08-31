@@ -26,7 +26,9 @@ What this script does:
 3. Pulls the per-book ``.bin`` blob to recover real chapter titles
    (Fabuly ships exactly one audio part per chapter/section).
 4. Tags each part (MP4 tags for .m4a, ID3 for .mp3) with title / author /
-   narrator / track / cover art.
+   narrator / track / cover art, plus year and genre from baked-in data
+   (LibriVox's own API for LibriVox books; Open Library for Fabuly ones --
+   see librivox.db's year/genre columns and fabuly_meta.json).
 5. Writes a ``<Book>.cue`` chapter index (same shape chirp_dl.py produces).
    The parts are already one-per-chapter, so nothing needs splitting -- the
    .cue is just for players that show a combined chapter list.
@@ -71,7 +73,7 @@ import urllib.request
 from pathlib import Path
 from typing import Iterable, Optional
 
-from mutagen.id3 import APIC, COMM, ID3, TALB, TCON, TIT2, TPE1, TPE2, TRCK
+from mutagen.id3 import APIC, COMM, ID3, TALB, TCON, TDRC, TIT2, TPE1, TPE2, TRCK
 from mutagen.mp3 import MP3
 from mutagen.mp4 import MP4, MP4Cover
 
@@ -83,7 +85,7 @@ HTTP_RETRIES = 4
 # ~8 s rebuild.  `--refresh` ignores it; it self-expires after CATALOG_TTL.
 CATALOG_CACHE = Path.home() / ".fabuly_catalog.json"
 CATALOG_TTL = 7 * 24 * 3600  # seconds
-_CACHE_SCHEMA = 3            # bump when the row shape changes
+_CACHE_SCHEMA = 4            # bump when the row shape changes
 
 
 def _read_catalog_cache() -> "Optional[list[dict]]":
@@ -380,22 +382,42 @@ _LV_DB: Optional[list[dict]] = None
 _ARCHIVE_ID_RE = re.compile(r"archive\.org/download/([^/]+)/")
 
 
-def librivox_db_path() -> Optional[Path]:
-    """Locate the bundled ``librivox.db`` (next to the script, in a
-    PyInstaller bundle, or in the current directory)."""
+def bundled_path(name: str) -> Optional[Path]:
+    """Locate a data file shipped with the tool (next to the script, in a
+    PyInstaller bundle, or the current directory)."""
     roots = []
     if getattr(sys, "frozen", False):
         roots.append(Path(getattr(sys, "_MEIPASS", ".")))
     roots += [Path(__file__).resolve().parent, Path.cwd()]
     for r in roots:
-        p = r / "librivox.db"
+        p = r / name
         if p.is_file():
             return p
     return None
 
 
+def librivox_db_path() -> Optional[Path]:
+    return bundled_path("librivox.db")
+
+
+_FABULY_META: Optional[dict] = None
+
+
+def load_fabuly_meta() -> dict:
+    """Baked-in Open Library data for Fabuly-hosted books: {slug: {year, subjects}}."""
+    global _FABULY_META
+    if _FABULY_META is None:
+        p = bundled_path("fabuly_meta.json")
+        try:
+            _FABULY_META = json.loads(p.read_text(encoding="utf-8")) if p else {}
+        except (OSError, ValueError):
+            _FABULY_META = {}
+    return _FABULY_META
+
+
 def load_librivox() -> list[dict]:
-    """Rows from librivox.db: {librivox_id, title, author, duration, language}."""
+    """Rows from librivox.db: {librivox_id, title, author, duration, language,
+    year, genre} -- year/genre present when the shipped db was enriched."""
     global _LV_DB
     if _LV_DB is None:
         p = librivox_db_path()
@@ -405,13 +427,20 @@ def load_librivox() -> list[dict]:
             _LV_DB = []
         else:
             con = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
-            _LV_DB = [
-                {"librivox_id": r[0], "title": r[1] or "",
-                 "author": (r[2] or "").strip(), "duration": r[3] or 0,
-                 "language": r[4] or ""}
-                for r in con.execute("SELECT id, title, author, "
-                                     "total_duration_seconds, language FROM book")
-            ]
+            cols = {c[1] for c in con.execute("PRAGMA table_info(book)")}
+            extra = ", ".join(c for c in ("year", "genre") if c in cols)
+            sel = ("SELECT id, title, author, total_duration_seconds, language"
+                   + (", " + extra if extra else "") + " FROM book")
+            _LV_DB = []
+            for r in con.execute(sel):
+                row = {"librivox_id": r[0], "title": r[1] or "",
+                       "author": (r[2] or "").strip(), "duration": r[3] or 0,
+                       "language": r[4] or "", "year": "", "genre": ""}
+                if "year" in cols:
+                    row["year"] = str(r[5] or "") if r[5] else ""
+                if "genre" in cols:
+                    row["genre"] = r[6 if "year" in cols else 5] or ""
+                _LV_DB.append(row)
             con.close()
     return _LV_DB
 
@@ -433,8 +462,8 @@ def safe_name(text: str) -> str:
     return text[:150] or "book"
 
 
-TEMPLATE_TOKENS = ("title", "author", "author_initial", "genre", "language",
-                   "source", "narrator", "slug")
+TEMPLATE_TOKENS = ("title", "author", "author_initial", "year", "decade",
+                   "genre", "language", "source", "narrator", "slug")
 _TOKEN_RE = re.compile(r"\{(\w+)\}")
 
 
@@ -446,10 +475,13 @@ def render_path_template(template: str, meta: dict) -> Path:
     ``{genre}`` for a LibriVox book) is dropped rather than left blank.
     """
     author = str(meta.get("author") or "")
+    year = re.sub(r"\D", "", str(meta.get("year") or ""))[:4]
     tokens = {
         "title": str(meta.get("title") or ""),
         "author": author,
         "author_initial": next((c.upper() for c in author if c.isalpha()), "#"),
+        "year": year,
+        "decade": (year[:3] + "0s") if len(year) == 4 else "",
         "genre": str(meta.get("genre") or "").split(";")[0].strip(),
         "language": str(meta.get("language") or ""),
         "source": str(meta.get("source") or ""),
@@ -582,12 +614,13 @@ class FabulyDownloader:
 
     def catalogue_rows(self) -> list[dict]:
         """Every downloadable book.  Row keys: title, author, narrators,
-        duration, language, genre, enhanced, slug, source."""
+        duration, year, language, genre, enhanced, slug, source."""
         authors = {b.get("author", "") for b in self.featured if b.get("author")}
         authors |= {c.get("name", "") for c in
                     (load_creators_full() or []) if c.get("type") == "AUTHOR"}
         authors = {a for a in authors if a}
         gnames = load_genre_names()
+        fmeta = load_fabuly_meta()
 
         def _hms(d: int) -> str:
             return f"{d // 3600}:{d % 3600 // 60:02d}" if d else ""
@@ -599,17 +632,22 @@ class FabulyDownloader:
         rows: dict[str, dict] = {}
         for b in self.featured:
             sid = b["bookId"]
+            fm = fmeta.get(sid) or {}
+            genre = "; ".join(dict.fromkeys(
+                gnames.get(g, g.replace("_", " ").title())
+                for g in b.get("subCategoryIds", []) or []
+                if g not in ("new", "recommendations")))
+            if not genre and fm.get("subjects"):
+                genre = "; ".join(fm["subjects"][:3])
             rows[sid] = {
                 "title": b.get("title", ""),
                 "author": b.get("author", ""),
                 "narrators": "; ".join(self.creators.get(n, n.replace("_", " ").title())
                                        for n in b.get("narratorsIds", []) or []),
                 "duration": _hms(b.get("durationInSeconds") or 0),
+                "year": str(fm.get("year") or ""),
                 "language": _slug_lang(sid) or "English",
-                "genre": "; ".join(dict.fromkeys(
-                    gnames.get(g, g.replace("_", " ").title())
-                    for g in b.get("subCategoryIds", []) or []
-                    if g not in ("new", "recommendations"))),
+                "genre": genre,
                 "enhanced": "yes" if b.get("isEnhancedAudioAvailable") else "",
                 "slug": sid,
                 "source": "storefront",
@@ -625,15 +663,18 @@ class FabulyDownloader:
                 bm = parse_book_bin(blob)
                 title = bm["title"] or title
                 author = bm["author"] or author
+            fm = fmeta.get(slug) or {}
             rows[slug] = {"title": title, "author": author, "narrators": "",
-                          "duration": "", "language": _slug_lang(slug) or "English",
-                          "genre": "", "enhanced": "", "slug": slug,
-                          "source": "bucket-only"}
+                          "duration": "", "year": str(fm.get("year") or ""),
+                          "language": _slug_lang(slug) or "English",
+                          "genre": "; ".join((fm.get("subjects") or [])[:3]),
+                          "enhanced": "", "slug": slug, "source": "bucket-only"}
         for b in load_librivox():
             rows[f"lv:{b['librivox_id']}"] = {
                 "title": b["title"], "author": b["author"], "narrators": "",
-                "duration": _hms(b["duration"]), "language": b["language"],
-                "genre": "", "enhanced": "", "slug": f"lv:{b['librivox_id']}",
+                "duration": _hms(b["duration"]), "year": b.get("year", ""),
+                "language": b["language"], "genre": b.get("genre", ""),
+                "enhanced": "", "slug": f"lv:{b['librivox_id']}",
                 "source": "librivox",
             }
         return sorted(rows.values(),
@@ -662,7 +703,7 @@ class FabulyDownloader:
     def _row_text(r: dict) -> str:
         """All searchable text for a row, lower-cased."""
         return " ".join((r["title"], r["author"], r["genre"], r["language"],
-                         r["slug"], _deslug(r["slug"]))).lower()
+                         r.get("year", ""), r["slug"], _deslug(r["slug"]))).lower()
 
     def filter_catalog(self, query: str = "", *, source: str = "",
                        language: str = "", genre: str = "") -> list[dict]:
@@ -691,8 +732,9 @@ class FabulyDownloader:
     @staticmethod
     def _print_row(r: dict, n: Optional[int] = None) -> None:
         num = f"{n:4d}. " if n is not None else "  "
-        bits = [b for b in (r["duration"], r["language"] if r["source"] == "librivox"
-                            else "", "enhanced" if r["enhanced"] else "",
+        bits = [b for b in (r.get("year", ""), r["duration"],
+                            r["language"] if r["source"] == "librivox" else "",
+                            "enhanced" if r["enhanced"] else "",
                             r["source"]) if b]
         print(f"{num}{r['title']}  -- {r['author'] or '?'}  ({', '.join(bits)})")
         print(f"      {r['slug']}")
@@ -726,7 +768,8 @@ class FabulyDownloader:
         """Catalogue row -> a book dict process() understands.  Carries the
         extra metadata so folder templates can use {genre} etc."""
         meta = {k: row.get(k, "") for k in
-                ("title", "author", "genre", "language", "narrators", "source")}
+                ("title", "author", "genre", "language", "narrators", "source",
+                 "year")}
         if row["slug"].startswith("lv:"):
             meta["librivox_id"] = int(row["slug"][3:])
         else:
@@ -739,14 +782,18 @@ class FabulyDownloader:
         q = query.strip().lower()
         qn = re.sub(r"[^a-z0-9]+", "_", q).strip("_")  # "the bet, poe" -> "the_bet_poe"
 
+        def _lv_book(b: dict) -> dict:
+            return {"librivox_id": b["librivox_id"], "title": b["title"],
+                    "author": b["author"], "year": b.get("year", ""),
+                    "genre": b.get("genre", "")}
+
         # 0. explicit LibriVox id: "lv:1234" / "lv1234" / "#1234"
         m = re.fullmatch(r"(?:lv[:#]?|#)(\d{1,7})", q)
         if m:
             lid = int(m.group(1))
             for b in load_librivox():
                 if b["librivox_id"] == lid:
-                    return [{"librivox_id": lid, "title": b["title"],
-                             "author": b["author"]}]
+                    return [_lv_book(b)]
             return [{"librivox_id": lid, "title": f"LibriVox #{lid}", "author": ""}]
 
         # 1. exact Fabuly slug in the bucket
@@ -763,8 +810,7 @@ class FabulyDownloader:
                 or qn in b.get("bookId", "").lower()]
         lv = [b for b in load_librivox()
               if q in b["title"].lower() or q in b["author"].lower()]
-        lv_cands = [{"librivox_id": b["librivox_id"], "title": b["title"],
-                     "author": b["author"]} for b in lv[:120]]
+        lv_cands = [_lv_book(b) for b in lv[:120]]
         if hits or lv_cands:
             if len(lv) > 120:
                 print(f"  ({len(lv)} LibriVox matches -- showing 120; "
@@ -849,9 +895,11 @@ class FabulyDownloader:
 
     def _tag(self, path: Path, *, track: int, total: int, chapter: str,
              book: str, author: str, narrator: str, summary: str,
-             cover: Optional[Path]) -> None:
+             cover: Optional[Path], year: str = "", genre: str = "") -> None:
         cover_bytes = cover.read_bytes() if cover else None
         is_png = bool(cover_bytes) and cover_bytes[:8] == b"\x89PNG\r\n\x1a\n"
+        year = re.sub(r"\D", "", str(year or ""))[:4]
+        genre = (genre or "").split(";")[0].strip()
         try:
             if path.suffix.lower() == ".m4a":
                 audio = MP4(str(path))
@@ -864,7 +912,9 @@ class FabulyDownloader:
                     audio["\xa9wrt"] = [narrator]
                 if summary:
                     audio["\xa9cmt"] = [summary]
-                audio["\xa9gen"] = ["Audiobook"]
+                if year:
+                    audio["\xa9day"] = [year]
+                audio["\xa9gen"] = [genre or "Audiobook"]
                 if cover_bytes:
                     fmt = MP4Cover.FORMAT_PNG if is_png else MP4Cover.FORMAT_JPEG
                     audio["covr"] = [MP4Cover(cover_bytes, imageformat=fmt)]
@@ -879,7 +929,9 @@ class FabulyDownloader:
                 tags.add(TALB(encoding=3, text=book))
                 tags.add(TPE1(encoding=3, text=author))
                 tags.add(TRCK(encoding=3, text=f"{track}/{total}"))
-                tags.add(TCON(encoding=3, text="Audiobook"))
+                tags.add(TCON(encoding=3, text=genre or "Audiobook"))
+                if year:
+                    tags.add(TDRC(encoding=3, text=year))
                 if narrator:
                     tags.add(TPE2(encoding=3, text=narrator))
                 if summary:
@@ -955,7 +1007,8 @@ class FabulyDownloader:
                 continue
             self._tag(dest, track=i, total=len(secs), chapter=chapter,
                       book=title, author=author, narrator="", summary=summary,
-                      cover=cover)
+                      cover=cover, year=book.get("year", ""),
+                      genre=book.get("genre", ""))
             cue_entries.append((dest.name, chapter))
 
         self._write_cue(title, author, book_dir, cue_entries)
@@ -1000,6 +1053,7 @@ class FabulyDownloader:
 
         title = book.get("title") or binmeta["title"] or slug_to_title(slug)
         author = book.get("author") or binmeta["author"] or "Unknown"
+        year = str(book.get("year") or load_fabuly_meta().get(slug, {}).get("year") or "")
         print(f"\n=== {title} ===")
         print(f"    slug: {slug}")
         narrator = ", ".join(
@@ -1022,7 +1076,7 @@ class FabulyDownloader:
 
         book_dir = self.out_dir / render_path_template(
             self.path_template,
-            {**book, "title": title, "author": author, "slug": slug,
+            {**book, "title": title, "author": author, "slug": slug, "year": year,
              "narrators": narrator, "source": book.get("source", "storefront")})
         book_dir.mkdir(parents=True, exist_ok=True)
         print(f"    -> {book_dir}")
@@ -1043,7 +1097,8 @@ class FabulyDownloader:
                 dest = self._transcode(dest)
             self._tag(dest, track=n, total=len(parts), chapter=chapter,
                       book=title, author=author, narrator=narrator,
-                      summary=summary, cover=cover)
+                      summary=summary, cover=cover, year=year,
+                      genre=book.get("genre", ""))
             cue_entries.append((dest.name, chapter))
 
         self._write_cue(title, author, book_dir, cue_entries)
@@ -1200,10 +1255,10 @@ def run_gui(dl: "FabulyDownloader") -> None:
     # --- middle: results table ---------------------------------------
     mid = ttk.Frame(root, padding=(8, 0))
     mid.pack(fill="both", expand=True)
-    cols = ("title", "author", "duration", "language", "source")
+    cols = ("title", "author", "year", "duration", "language", "genre", "source")
     tree = ttk.Treeview(mid, columns=cols, show="headings", selectmode="extended")
-    widths = {"title": 420, "author": 220, "duration": 70, "language": 90,
-              "source": 90}
+    widths = {"title": 360, "author": 190, "year": 55, "duration": 65,
+              "language": 80, "genre": 170, "source": 85}
     for c in cols:
         tree.heading(c, text=c.title(),
                      command=lambda cc=c: _sort_by(cc))
@@ -1238,7 +1293,9 @@ def run_gui(dl: "FabulyDownloader") -> None:
     tmpl_cb = ttk.Combobox(bot, textvariable=tmpl_var, values=[
         "{title}",
         "{author}/{title}",
+        "{author}/{year} - {title}",
         "{author_initial}/{author}/{title}",
+        "{decade}/{author} - {title}",
         "{source}/{author}/{title}",
         "{language}/{author}/{title}",
         "{genre}/{title}",
@@ -1260,8 +1317,9 @@ def run_gui(dl: "FabulyDownloader") -> None:
         tree.delete(*tree.get_children())
         for i, r in enumerate(rows[:2000]):
             tree.insert("", "end", iid=str(i),
-                        values=(r["title"], r["author"] or "?", r["duration"],
-                                r["language"], r["source"]))
+                        values=(r["title"], r["author"] or "?", r.get("year", ""),
+                                r["duration"], r["language"],
+                                r["genre"].split(";")[0], r["source"]))
         extra = f"  (first 2000 shown)" if len(rows) > 2000 else ""
         status.config(text=f"{len(rows):,} of {len(state['rows']):,} books{extra}")
 

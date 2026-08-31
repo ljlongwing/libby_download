@@ -62,7 +62,13 @@ python fabuly_dl.py --book "moby dick" --template "{author}/{title}"
 python fabuly_dl.py --template "{source}/{author_initial}/{author}/{title}"
 ```
 
-Tokens: `{title}` `{author}` `{author_initial}` `{genre}` `{language}` `{source}` `{narrator}` `{slug}`. `/` makes sub-folders; a token that's empty for a given book (e.g. `{genre}` on a LibriVox title) just drops that folder level.
+Tokens: `{title}` `{author}` `{author_initial}` `{year}` `{decade}` `{genre}` `{language}` `{source}` `{narrator}` `{slug}`. `/` makes sub-folders; a token that's empty for a given book just drops that folder level.
+
+**Year & genre.** These come from a metadata set that's **baked into the tool** — no lookups at download time:
+- LibriVox books (~19k): year and genre from LibriVox's own API (`copyright_year` is the original text's year, not the recording), harvested once into `librivox.db`'s `year`/`genre` columns. ~99% have a year.
+- Fabuly-hosted books (~435): `first_publish_year` and subjects from [Open Library](https://openlibrary.org), harvested into the bundled `fabuly_meta.json`. ~60% match (the rest are obscure short stories); this is an *edition* year, so treat it as approximate.
+
+They fill the GUI's Year/Genre columns, the `{year}`/`{decade}` template tokens, and the ID3/MP4 year+genre tags on every downloaded file. The one-off harvest/bake scripts live in `scripts/fabuly_metadata/` if the catalogues drift and it needs regenerating.
 
 The merged catalogue (both sources, ~19,500 rows) is **cached at `~/.fabuly_catalog.json`** so the browser opens instantly after the first run; it refreshes itself weekly, or `--refresh` rebuilds it now. Cover art isn't fetched until you download a book (it's saved into that book's folder), so there's nothing else to cache.
 
