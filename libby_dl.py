@@ -1006,27 +1006,38 @@ class LibbyDownloader:
         frames = [page.main_frame] + [f for f in page.frames if f is not page.main_frame]
 
         # Try to open the TOC panel by clicking a chapters/TOC button.
+        # Poll for up to ~15s instead of a single pass -- books with a long
+        # TOC (many chapters/parts) can take noticeably longer for the
+        # player UI to finish rendering this button than the fixed waits
+        # elsewhere assume, and a single miss here starves every downstream
+        # step (metadata, reading order, seek targets).
         toc_btn = None
         toc_frame = None
         toc_labels = ("Table of Contents", "Chapters", "Contents", "TOC")
-        for frame in frames:
-            for label in toc_labels:
-                try:
-                    btn = frame.get_by_role("button", name=label, exact=False)
-                    if await btn.count() == 0:
-                        btn = frame.get_by_role("link", name=label, exact=False)
-                    if await btn.count() > 0:
-                        await btn.first.click(timeout=5_000)
-                        toc_btn = btn.first
-                        toc_frame = frame
-                        self._toc_btn = toc_btn
-                        self._toc_frame = toc_frame
-                        await page.wait_for_timeout(2_000)
-                        break
-                except Exception:
-                    continue
-            if toc_btn is not None:
+        deadline = time.monotonic() + 15.0
+        while toc_btn is None:
+            frames = [page.main_frame] + [f for f in page.frames if f is not page.main_frame]
+            for frame in frames:
+                for label in toc_labels:
+                    try:
+                        btn = frame.get_by_role("button", name=label, exact=False)
+                        if await btn.count() == 0:
+                            btn = frame.get_by_role("link", name=label, exact=False)
+                        if await btn.count() > 0:
+                            await btn.first.click(timeout=5_000)
+                            toc_btn = btn.first
+                            toc_frame = frame
+                            self._toc_btn = toc_btn
+                            self._toc_frame = toc_frame
+                            await page.wait_for_timeout(2_000)
+                            break
+                    except Exception:
+                        continue
+                if toc_btn is not None:
+                    break
+            if toc_btn is not None or time.monotonic() >= deadline:
                 break
+            await page.wait_for_timeout(1_000)
 
         # Scrape chapter rows FIRST while TOC is definitely open.
         toc_js = """
@@ -1385,11 +1396,18 @@ class LibbyDownloader:
         await self._start_playback(page)
         await page.wait_for_timeout(2_000)
 
-        # Reset to the very beginning regardless of any saved position.
-        print("  Resetting to start of book...")
-        await self._set_audio_time(page, 0)
-        await page.wait_for_timeout(2_000)
-
+        # Do NOT force audio.currentTime = 0 here. On a loan that Libby
+        # resumed at a saved position (not part 1), the TOC-panel click
+        # in _extract_toc_from_ui() already asked Libby to switch streams
+        # back to chapter 1 asynchronously; mutating currentTime/calling
+        # play() again while that switch is in flight triggers a Dewey
+        # ("Playback failed. Try opening the audiobook.") error that
+        # collapses the full player into the shelf mini-player, which then
+        # makes every subsequent TOC/part lookup fail (reported upstream:
+        # https://github.com/ljlongwing/libby_download/issues/5). It's also
+        # unnecessary: currentTime = 0 only rewinds the current part file,
+        # not the whole book, and each seek method below already starts
+        # from the beginning on its own.
         if self.reading_order:
             await self._seek_by_reading_order(page)
         elif self.toc:
@@ -1794,10 +1812,15 @@ class LibbyDownloader:
 
     async def _start_playback(self, page: Page) -> None:
         # Libby's player runs inside an iframe; search all frames.
+        # button.playback-toggle first, and the two generic fallbacks
+        # exclude *mini* classes -- otherwise these loose selectors can
+        # match the shelf's mini-player-playback-toggle instead of the
+        # full player's play button (see upstream issue #5).
         selectors = (
+            "button.playback-toggle",
             '[aria-label="Play"]',
-            '[aria-label*="play" i]',
-            'button[class*="play"]',
+            'button[class*="play"]:not([class*="mini"])',
+            '[aria-label*="play" i]:not([class*="mini"])',
             '[title="Play"]',
         )
         frames = [page.main_frame] + [f for f in page.frames if f is not page.main_frame]
@@ -2120,11 +2143,34 @@ class LibbyDownloader:
         """Fallback when there is no reading order: step across the full
         audio duration in chunks.
         """
-        total: float = await self._eval_in_frames(
-            page,
-            "() => { const a = document.querySelector('audio'); "
-            "return a ? a.duration : 0; }",
-        ) or 0.0
+        # Prefer whatever total duration metadata extraction already found
+        # (from the player's on-screen timeline widget -- reliable even when
+        # the <audio> element's own .duration isn't populated yet, which
+        # happens for some books). Fall back to the raw element, then to a
+        # fresh timeline scrape as a last resort.
+        total: float = self.total_book_duration
+
+        if total <= 0:
+            total = await self._eval_in_frames(
+                page,
+                "() => { const a = document.querySelector('audio'); "
+                "return a ? a.duration : 0; }",
+            ) or 0.0
+
+        if total <= 0:
+            frames = [page.main_frame] + [f for f in page.frames if f is not page.main_frame]
+            for frame in frames:
+                try:
+                    result = await frame.evaluate(_TIMELINE_JS)
+                    if result and isinstance(result, dict):
+                        start_s = _parse_timeline_seconds(result.get("start"))
+                        end_s = _parse_timeline_seconds(result.get("end"))
+                        total_s = start_s + end_s
+                        if total_s > 0:
+                            total = total_s
+                            break
+                except Exception:
+                    continue
 
         if total <= 0:
             print("  Could not determine duration automatically.")
