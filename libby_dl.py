@@ -480,9 +480,10 @@ class LibbyDownloader:
         # by tracking whether we saw a shelf-shaped response at all,
         # independent of whether it happened to contain any loans.
         api_loans: list[dict] = []
-        api_response_seen = asyncio.Event()
+        any_response_seen = False
 
         async def _on_shelf_response(resp) -> None:
+            nonlocal api_loans, any_response_seen
             try:
                 if resp.status != 200:
                     return
@@ -504,9 +505,19 @@ class LibbyDownloader:
                 if not isinstance(data, dict):
                     return
                 raw = data.get("loans") or data.get("items") or []
-                api_response_seen.set()
+                any_response_seen = True
                 if not isinstance(raw, list):
                     return
+                # Libby's client fires chip/sync more than once per page
+                # load (confirmed live: an initial call, then another after
+                # it re-acquires its "chip" client identity) -- especially
+                # right after a fresh login, when the first response can be
+                # an early, still-empty snapshot fired before the account's
+                # cards/loans have finished re-attaching. Each response is a
+                # full snapshot, not a delta, so overwrite rather than
+                # append: the caller should end up with whatever the LAST
+                # response in the listening window said, not the first.
+                loans_this_call = []
                 for loan in raw:
                     if not isinstance(loan, dict) or not loan.get("title"):
                         continue
@@ -514,7 +525,7 @@ class LibbyDownloader:
                     if media_type and media_type != "audiobook":
                         continue  # skip non-audiobooks only when type is known
                     loan_id = str(loan.get("id") or loan.get("titleId") or "")
-                    api_loans.append({
+                    loans_this_call.append({
                         "id": loan_id,
                         "card_id": str(loan.get("cardId") or loan.get("websiteId") or ""),
                         "title": loan.get("title", ""),
@@ -532,6 +543,7 @@ class LibbyDownloader:
                             f"{LIBBY_URL}/shelf/similar-{loan_id}/page-1/{loan_id}" if loan_id else ""
                         ),
                     })
+                api_loans = loans_this_call
             except Exception:
                 pass
 
@@ -541,16 +553,17 @@ class LibbyDownloader:
             # listener is registered (avoids missing an already-loaded page).
             await page.goto(LIBBY_URL + "/shelf", wait_until="load", timeout=30_000)
             await page.wait_for_timeout(2_000)
-            try:
-                await asyncio.wait_for(api_response_seen.wait(), timeout=8)
-            except asyncio.TimeoutError:
-                pass
+            # Listen for the full window rather than returning as soon as
+            # the first chip/sync response arrives -- see the comment above
+            # for why an early return can hand back a premature, empty
+            # snapshot.
+            await page.wait_for_timeout(8_000)
         except Exception:
             pass
         finally:
             page.remove_listener("response", _on_shelf_response)
 
-        if api_response_seen.is_set():
+        if any_response_seen:
             return sorted(api_loans, key=lambda b: b.get("title", "").lower())
 
         # Fallback: the shelf-sync call was never observed at all (blocked,
