@@ -87,6 +87,14 @@ class LibbyDownloader:
         self._toc_btn = None
         self._toc_frame = None
 
+        # Set by _verify_duration_and_refetch() when the downloaded audio
+        # falls meaningfully short of the book's known duration. Checked by
+        # callers (e.g. the service worker) after a successful
+        # _download_selected_book() call -- "no exception" alone doesn't
+        # mean every part was actually captured.
+        self.duration_ok: bool = True
+        self.duration_warning: str = ""
+
     # ------------------------------------------------------------------
     # Entry point
     # ------------------------------------------------------------------
@@ -297,6 +305,8 @@ class LibbyDownloader:
         self.total_book_duration = 0.0
         self._toc_btn = None
         self._toc_frame = None
+        self.duration_ok = True
+        self.duration_warning = ""
 
     async def _download_selected_book(self, page, context, player_page, book: dict) -> None:
         """Download one book (a shelf entry dict from _get_shelf) using an
@@ -2310,6 +2320,11 @@ class LibbyDownloader:
             return
 
         print(f"Warning: {diff_display}s of audio unaccounted for — some parts may be missing.")
+        self.duration_ok = False
+        self.duration_warning = (
+            f"Incomplete: got {_fmt_hms(actual)} of {_fmt_hms(expected)} expected "
+            f"({diff_display}s missing)"
+        )
 
     async def _download_all(self, book_name: str) -> None:
         print(f"\nDownloading {len(self.captured)} file(s) -> {self.output_dir.resolve()}/")

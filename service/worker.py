@@ -103,7 +103,7 @@ async def scan_once(source: str) -> dict:
             log.clear()
             old_stdout = sys.stdout
             sys.stdout = _TeeWriter(old_stdout, log, _SCAN_LOG_MAXLEN)
-            downloaded = failed = skipped = 0
+            downloaded = failed = skipped = partial = 0
             try:
                 output_dir = db.get_config("output_dir")
                 # headless=True was tried first for Libby but its player
@@ -199,11 +199,27 @@ async def scan_once(source: str) -> dict:
 
                                 try:
                                     await downloader._download_selected_book(page, context, player_page, book)
-                                    db.upsert_book(
-                                        source, loan_id, title, author, status="complete", card_id=card_id,
-                                        output_path=str(downloader.output_dir), mark_downloaded=True,
-                                    )
-                                    downloaded += 1
+                                    # No exception only means capture didn't come up
+                                    # completely empty -- a duration shortfall (missed
+                                    # parts) is caught separately and must not be
+                                    # reported as a clean "complete" (a book that only
+                                    # captured 1 of 11 parts was previously shown as
+                                    # complete in the dashboard).
+                                    if getattr(downloader, "duration_ok", True):
+                                        db.upsert_book(
+                                            source, loan_id, title, author, status="complete", card_id=card_id,
+                                            output_path=str(downloader.output_dir), mark_downloaded=True,
+                                        )
+                                        downloaded += 1
+                                    else:
+                                        warning = getattr(downloader, "duration_warning", "") or "Incomplete download"
+                                        logger.warning("[%s] Partial download for %r: %s", source, title, warning)
+                                        db.upsert_book(
+                                            source, loan_id, title, author, status="partial", card_id=card_id,
+                                            error=warning, output_path=str(downloader.output_dir),
+                                            mark_downloaded=True,
+                                        )
+                                        partial += 1
                                 except Exception as e:
                                     logger.exception("[%s] Download failed for %r", source, title)
                                     db.upsert_book(
@@ -227,7 +243,7 @@ async def scan_once(source: str) -> dict:
                 if session_expired:
                     result = {"not_run": True, "reason": "Session expired or invalid — please re-authenticate."}
                 else:
-                    result = {"downloaded": downloaded, "failed": failed, "skipped": skipped}
+                    result = {"downloaded": downloaded, "failed": failed, "partial": partial, "skipped": skipped}
             except Exception as e:
                 logger.exception("[%s] Scan failed", source)
                 result = {"error": str(e)}

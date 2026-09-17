@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS books (
     card_id TEXT,
     title TEXT,
     author TEXT,
-    status TEXT NOT NULL,          -- pending | downloading | complete | failed
+    status TEXT NOT NULL,          -- pending | downloading | complete | partial | failed
     error TEXT,
     output_path TEXT,
     first_seen_at TEXT NOT NULL,

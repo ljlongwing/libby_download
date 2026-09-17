@@ -25,7 +25,7 @@
       {% elif src.last_scan.not_run %}
         skipped &mdash; {{ src.last_scan.reason }}
       {% else %}
-        {{ src.last_scan.downloaded }} downloaded, {{ src.last_scan.failed }} failed, {{ src.last_scan.skipped }} already had
+        {{ src.last_scan.downloaded }} downloaded, {{ src.last_scan.partial or 0 }} partial, {{ src.last_scan.failed }} failed, {{ src.last_scan.skipped }} already had
       {% endif %}
     {% else %}
       No scan has run yet.
@@ -74,7 +74,7 @@
         <td class="status-{{ b.status }}">{{ b.status }}{% if b.error %} ({{ b.error }}){% endif %}</td>
         <td>{% if b.downloaded_at %}<time class="local-time" datetime="{{ b.downloaded_at }}">{{ b.downloaded_at }}</time>{% else %}&mdash;{% endif %}</td>
         <td>
-          {% if b.status in ('complete', 'failed') %}
+          {% if b.status in ('complete', 'partial', 'failed') %}
           <form method="post" action="/rebook/{{ src.key }}/{{ b.loan_id }}" style="margin:0;">
             <button type="submit" {% if src.scan_running %}disabled{% endif %}>Re-download</button>
           </form>
@@ -260,7 +260,7 @@ function renderShelf(source, shelf, scanRunning, rawCount) {
     tr.appendChild(dlTd);
 
     const actionTd = document.createElement('td');
-    if (b.status === 'complete' || b.status === 'failed') {
+    if (b.status === 'complete' || b.status === 'partial' || b.status === 'failed') {
       const form = document.createElement('form');
       form.method = 'post';
       form.action = `/rebook/${source}/${encodeURIComponent(b.loan_id)}`;
