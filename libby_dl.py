@@ -727,6 +727,41 @@ class LibbyDownloader:
     # ------------------------------------------------------------------
 
     async def _open_player(self, page: Page, book: dict) -> None:
+        # Libby's open call (sentry.libbyapp.com/open/audiobook/card/...)
+        # answers 403 when the card is suspended -- confirmed live: the app
+        # logs "card suspended" and bounces to interview/status/card-review
+        # ("Review Our Terms"). Without this the failure looked like the
+        # player just not loading and fell through to the manual-click prompt.
+        refusals: list[str] = []
+
+        async def _on_open_response(resp) -> None:
+            if resp.status >= 400 and "sentry.libbyapp.com/open/" in resp.url:
+                # Body is e.g. {"result":"card_suspended","cardId":"...",...}
+                detail = ""
+                try:
+                    detail = str((await resp.json()).get("result") or "")
+                except Exception:
+                    pass
+                refusals.append(f"HTTP {resp.status}" + (f": {detail}" if detail else ""))
+
+        page.context.on("response", _on_open_response)
+        try:
+            await self._open_player_inner(page, book, refusals)
+        finally:
+            page.context.remove_listener("response", _on_open_response)
+
+    def _raise_if_refused(self, page: Page, book: dict, refusals: list[str]) -> None:
+        if not refusals and "card-review" not in page.url:
+            return
+        reason = refusals[-1] if refusals else f"redirected to {page.url}"
+        suspended = "card-review" in page.url or reason.startswith("HTTP 403")
+        hint = (
+            " -- Libby reports this library card as SUSPENDED. "
+            "Check the card in the Libby app." if suspended else ""
+        )
+        raise RuntimeError(f"Libby refused to open '{book['title']}' ({reason}){hint}")
+
+    async def _open_player_inner(self, page: Page, book: dict, refusals: list[str]) -> None:
         print(f"\nOpening: {book['title']}")
 
         # If the shelf gave us a direct href, try it first.
@@ -747,6 +782,7 @@ class LibbyDownloader:
             print(f"  Trying direct URL: {direct_url}")
             await page.goto(direct_url, wait_until="load", timeout=60_000)
             await page.wait_for_timeout(3_000)
+            self._raise_if_refused(page, book, refusals)
             if "/open/" in page.url:
                 print(f"  Player URL: {page.url}")
                 return
@@ -800,6 +836,7 @@ class LibbyDownloader:
             except Exception:
                 continue
 
+        self._raise_if_refused(page, book, refusals)
         if not opened:
             print(
                 "\n  Could not open the player automatically.\n"
