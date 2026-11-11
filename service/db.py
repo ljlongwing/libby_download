@@ -56,7 +56,7 @@ DEFAULT_CONFIG = {
     # actually mounted. Shared between sources since each book already
     # nests under its own <Source Book Name>/ subfolder.
     "output_dir": "/books",
-    "libby_scan_interval_minutes": "15",
+    "libby_scan_interval_minutes": "360",
     "chirp_scan_interval_minutes": "15",
 }
 

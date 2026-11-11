@@ -8,6 +8,7 @@ is no per-source branching in the scan logic itself.
 """
 
 import asyncio
+import random
 import logging
 import sys
 from datetime import datetime, timedelta, timezone
@@ -286,6 +287,7 @@ async def loop_forever(source: str) -> None:
             interval_minutes = float(db.get_config(f"{source}_scan_interval_minutes") or 15)
         except ValueError:
             interval_minutes = 15
-        sleep_s = max(60.0, interval_minutes * 60)
+        # Jittered so polls don't land on a fixed, machine-like cadence.
+        sleep_s = max(60.0, interval_minutes * 60 * random.uniform(0.7, 1.3))
         next_scan_at[source] = (datetime.now(timezone.utc) + timedelta(seconds=sleep_s)).isoformat()
         await asyncio.sleep(sleep_s)

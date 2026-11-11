@@ -30,13 +30,16 @@ Requirements
 
 import argparse
 import asyncio
+import base64
 import os
+import random
 import re
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Optional, Union
+from urllib.parse import urlparse
 
 import requests
 from mutagen.id3 import APIC, COMM, TALB, TIT2, TIT3, TPE1, TPE2, TYER, TRCK, ID3
@@ -76,6 +79,7 @@ class LibbyDownloader:
         # Populated as audio requests are intercepted during seeking.
         self.captured: list[dict] = []          # [{url, headers, filename}]
         self.captured_filenames: set[str] = set()
+        self._fetch_frame = None               # page frame that last fetched audio OK
 
         # Populated from the BIFOCAL <script> embedded in the player page.
         self.metadata: dict = {}
@@ -178,7 +182,7 @@ class LibbyDownloader:
             browser, context, page, _player_page = await self._launch_browser_context(pw)
             try:
                 await page.goto(LIBBY_URL, wait_until="load", timeout=60_000)
-                await page.wait_for_timeout(2_000)
+                await _pause(page, 2_000)
 
                 print(
                     "\nThe browser window is open. Add or remove library cards "
@@ -299,6 +303,7 @@ class LibbyDownloader:
         self.output_dir = self._base_output_dir
         self.captured = []
         self.captured_filenames = set()
+        self._fetch_frame = None
         self.metadata = {}
         self.toc = {}
         self.reading_order = []
@@ -333,7 +338,7 @@ class LibbyDownloader:
                 await active.wait_for_load_state("load", timeout=60_000)
             except Exception:
                 pass
-            await active.wait_for_timeout(2_000)
+            await _pause(active, 2_000)
 
         await self._extract_bifocal(active)
         await self._seek_through_book(active)
@@ -357,7 +362,7 @@ class LibbyDownloader:
         self.output_dir = self._base_output_dir / book_name
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        await self._download_all(book_name)
+        await self._download_all(active, book_name)
         await self._verify_duration_and_refetch(active, book_name)
         self._write_cue(book_name)
         self._split_chapters(book_name)
@@ -370,7 +375,7 @@ class LibbyDownloader:
         self, page: Page, context: BrowserContext
     ) -> None:
         await page.goto(LIBBY_URL, wait_until="load", timeout=60_000)
-        await page.wait_for_timeout(2_000)
+        await _pause(page, 2_000)
 
         if await self._is_logged_in(page):
             print("Authenticated.")
@@ -444,7 +449,7 @@ class LibbyDownloader:
         elapsed = 0.0
         interval = 3.0
         while elapsed < timeout_s:
-            await page.wait_for_timeout(int(interval * 1000))
+            await _pause(page, int(interval * 1000))
             elapsed += interval
             if await self._is_logged_in(page):
                 consecutive_ok += 1
@@ -552,12 +557,12 @@ class LibbyDownloader:
             # Always navigate fresh so the shelf API call fires after the
             # listener is registered (avoids missing an already-loaded page).
             await page.goto(LIBBY_URL + "/shelf", wait_until="load", timeout=30_000)
-            await page.wait_for_timeout(2_000)
+            await _pause(page, 2_000)
             # Listen for the full window rather than returning as soon as
             # the first chip/sync response arrives -- see the comment above
             # for why an early return can hand back a premature, empty
             # snapshot.
-            await page.wait_for_timeout(8_000)
+            await _pause(page, 8_000)
         except Exception:
             pass
         finally:
@@ -769,7 +774,7 @@ class LibbyDownloader:
         if href:
             url = href if href.startswith("http") else LIBBY_URL + href
             await page.goto(url, wait_until="load", timeout=60_000)
-            await page.wait_for_timeout(3_000)
+            await _pause(page, 3_000)
             if "/open/" in page.url:
                 print(f"  Player URL: {page.url}")
                 return
@@ -781,7 +786,7 @@ class LibbyDownloader:
             direct_url = f"{LIBBY_URL}/open/loan/{card_id}/{loan_id}"
             print(f"  Trying direct URL: {direct_url}")
             await page.goto(direct_url, wait_until="load", timeout=60_000)
-            await page.wait_for_timeout(3_000)
+            await _pause(page, 3_000)
             self._raise_if_refused(page, book, refusals)
             if "/open/" in page.url:
                 print(f"  Player URL: {page.url}")
@@ -790,7 +795,7 @@ class LibbyDownloader:
         # Navigate to the shelf and try to click the Open Audiobook button.
         if "/shelf" not in page.url:
             await page.goto(LIBBY_URL + "/shelf", wait_until="load", timeout=30_000)
-            await page.wait_for_timeout(2_000)
+            await _pause(page, 2_000)
 
         # Try text-based button matching (handles React onClick buttons with no href).
         title_lower = book["title"].lower()
@@ -830,7 +835,7 @@ class LibbyDownloader:
                     print(f"  Clicking '{label}' button...")
                     await chosen.click(timeout=15_000)
                     await page.wait_for_load_state("load", timeout=60_000)
-                    await page.wait_for_timeout(3_000)
+                    await _pause(page, 3_000)
                     opened = True
                     break
             except Exception:
@@ -849,9 +854,9 @@ class LibbyDownloader:
                 # player is loading stuck pending until Enter is pressed.
                 await asyncio.to_thread(input, "  >>> Press Enter when player is open: ")
             except EOFError:
-                await page.wait_for_timeout(10_000)
+                await _pause(page, 10_000)
 
-        await page.wait_for_timeout(2_000)
+        await _pause(page, 2_000)
         print(f"  Player URL: {page.url}")
 
     # ------------------------------------------------------------------
@@ -1047,7 +1052,7 @@ class LibbyDownloader:
 
         # Give the player a moment to populate its globals -- only paid when
         # this fallback actually runs, not on every book.
-        await page.wait_for_timeout(6_000)
+        await _pause(page, 6_000)
         for frame in frames_to_check:
             try:
                 data = await frame.evaluate(bifocal_js)
@@ -1089,7 +1094,7 @@ class LibbyDownloader:
                             toc_frame = frame
                             self._toc_btn = toc_btn
                             self._toc_frame = toc_frame
-                            await page.wait_for_timeout(2_000)
+                            await _pause(page, 2_000)
                             break
                     except Exception:
                         continue
@@ -1097,7 +1102,7 @@ class LibbyDownloader:
                     break
             if toc_btn is not None or time.monotonic() >= deadline:
                 break
-            await page.wait_for_timeout(1_000)
+            await _pause(page, 1_000)
 
         # Scrape chapter rows FIRST while TOC is definitely open.
         toc_js = """
@@ -1259,7 +1264,7 @@ class LibbyDownloader:
                         await clickable.click(timeout=5_000)
                     else:
                         await row.click(timeout=5_000)
-                    await page.wait_for_timeout(2_000)
+                    await _pause(page, 2_000)
                     break
                 else: continue
                 break
@@ -1269,7 +1274,7 @@ class LibbyDownloader:
         if toc_frame is not None:
             try:
                 await toc_frame.locator("body").press("Escape")
-                await page.wait_for_timeout(800)
+                await _pause(page, 800)
             except Exception:
                 pass
 
@@ -1325,7 +1330,7 @@ class LibbyDownloader:
         try:
             print("  Opening 'About This Audiobook' for extra metadata...")
             await about_btn.click(timeout=5_000)
-            await page.wait_for_timeout(2_000)
+            await _pause(page, 2_000)
         except Exception:
             return
 
@@ -1395,7 +1400,7 @@ class LibbyDownloader:
         try:
             if about_frame is not None:
                 await about_frame.locator("body").press("Escape")
-                await page.wait_for_timeout(1_000)
+                await _pause(page, 1_000)
         except Exception:
             pass
 
@@ -1422,7 +1427,7 @@ class LibbyDownloader:
             # Match only filenames like BookTitle-Part001.mp3
             clean_url = url.split("?")[0]
             filename = clean_url.split("/")[-1]
-            if not re.search(r"[Pp]art\d+\.mp3$", filename):
+            if not re.search(r"part\d+\.mp3$", filename, re.I):  # Libby also serves FMT425-PART01.MP3
                 return
 
             # One entry per unique filename (first URL wins so we keep the
@@ -1454,7 +1459,7 @@ class LibbyDownloader:
         print("\nSeeking through book to trigger all part requests...")
 
         await self._start_playback(page)
-        await page.wait_for_timeout(2_000)
+        await _pause(page, 2_000)
 
         # Do NOT force audio.currentTime = 0 here. On a loan that Libby
         # resumed at a saved position (not part 1), the TOC-panel click
@@ -1468,6 +1473,18 @@ class LibbyDownloader:
         # unnecessary: currentTime = 0 only rewinds the current part file,
         # not the whole book, and each seek method below already starts
         # from the beginning on its own.
+        for _ in range(20):  # wait for play to fire the first part request
+            if self.captured:
+                break
+            await page.wait_for_timeout(500)
+        # Fast path: every part shares one URL pattern, so fetch them by URL
+        # instead of scrubbing the player across the whole book, which Libby
+        # sees as wild position jumps. A short tail missed here is still caught
+        # by _verify_duration_and_refetch after download.
+        if await self._guess_remaining_parts(page):
+            await self._stop_playback(page)
+            return
+
         if self.reading_order:
             await self._seek_by_reading_order(page)
         elif self.toc:
@@ -1476,7 +1493,7 @@ class LibbyDownloader:
             await self._seek_by_duration(page)
 
         # Extra wait for any in-flight requests to resolve.
-        await page.wait_for_timeout(3_000)
+        await _pause(page, 3_000)
 
         # Validate that we captured the expected set of parts and retry if needed.
         await self._ensure_all_parts_captured(page)
@@ -1489,6 +1506,94 @@ class LibbyDownloader:
 
         # Stop playback so the book isn't left running in the background.
         await self._stop_playback(page)
+
+    async def _guess_remaining_parts(self, page: Page) -> bool:
+        """Add every part the player hasn't requested yet by rewriting the
+        part number in a captured URL. Probes one guess first; returns False
+        (and adds nothing) if guessing can't be done or the probe fails, so
+        the caller falls back to seeking."""
+        expected = max([len(self.reading_order)]
+                       + [_part_number(k or "") for k in self.toc])
+        if not self.captured or expected < 2:
+            return False
+        seed = self.captured[0]
+        have = {_part_number(p["filename"]) for p in self.captured}
+
+        def guess(n: int) -> Optional[dict]:
+            url = _swap_part_number(seed["url"], n)
+            return url and {"url": url, "headers": seed["headers"],
+                            "filename": url.split("?")[0].split("/")[-1]}
+
+        guesses = [guess(n) for n in range(1, expected + 1) if n not in have]
+        if not all(guesses) or not _swap_part_number(seed["url"], 1):
+            return False
+        if guesses and not await self._probe(page, guesses[0]):
+            print("  Part URLs aren't predictable for this book; seeking instead.")
+            return False
+        # The TOC can omit trailing parts (readingOrder can't), and the
+        # post-download duration check only warns, so look past the end.
+        if not self.reading_order:
+            while (g := guess(expected + 1)) and await self._probe(page, g):
+                guesses.append(g)
+                expected += 1
+        for g in guesses:
+            self.captured_filenames.add(g["filename"])
+            self.captured.append(g)
+        print(f"  Using predicted URLs for all {expected} part(s); no seeking needed.")
+        return True
+
+    async def _probe(self, page: Page, part: dict) -> bool:
+        """2-byte range read, like the audio element's own first request."""
+        r = await self._browser_fetch(page, part["url"], 0, 1)
+        if r is not None:
+            return r["status"] in (200, 206) and "audio" in r["ct"]
+        try:  # browser couldn't fetch at all (e.g. CORS): ask directly
+            resp = requests.get(part["url"], headers={**_strip_range(part["headers"]),
+                                "Range": "bytes=0-1"}, timeout=30, stream=True)
+            resp.close()
+            return resp.status_code in (200, 206) and "audio" in resp.headers.get("content-type", "")
+        except Exception:
+            return False
+
+    async def _browser_fetch(self, page: Page, url: str, start: int, end: int) -> Optional[dict]:
+        """Range-fetch from inside the page so the request goes out over
+        Chrome's own network stack (TLS/HTTP2 fingerprint, cookies) rather
+        than Python's. Tries the frame on the audio's own host first (same
+        origin, so no CORS). Returns {status, ct, cr, b64}, or None if no
+        frame could fetch at all."""
+        host = urlparse(url).netloc
+        frames = sorted(page.frames, key=lambda f: urlparse(f.url).netloc != host)
+        if self._fetch_frame in frames:
+            frames.insert(0, self._fetch_frame)
+        for frame in frames:
+            try:
+                r = await frame.evaluate(_RANGE_FETCH_JS, [url, start, end])
+            except Exception:
+                continue
+            self._fetch_frame = frame
+            return r
+        return None
+
+    async def _browser_download(self, page: Page, url: str, out_path: Path) -> bool:
+        """Download url to out_path in CHUNK-sized range requests via the page."""
+        CHUNK = 4 * 1024 * 1024
+        pos, total = 0, None
+        with open(out_path, "wb") as f:
+            while total is None or pos < total:
+                r = await self._browser_fetch(page, url, pos, pos + CHUNK - 1)
+                if r is None:
+                    return False
+                if r["status"] == 416 and pos > 0:  # size was an exact multiple of CHUNK
+                    break
+                if r["status"] not in (200, 206) or "audio" not in r["ct"]:
+                    return False
+                data = base64.b64decode(r["b64"])
+                f.write(data)
+                pos += len(data)
+                if r["status"] == 200 or len(data) < CHUNK:  # whole file, or last chunk
+                    break
+                total = int(r["cr"].rsplit("/", 1)[-1]) if r["cr"][-1:].isdigit() else None
+        return pos > 0
 
     async def _button_sweep_for_gaps(self, page: Page) -> None:
         """Sweep the book from the start using chapter-bar UI buttons to fill gaps.
@@ -1527,7 +1632,7 @@ class LibbyDownloader:
         if self._toc_btn is not None:
             try:
                 await self._toc_btn.click(timeout=5_000)
-                await page.wait_for_timeout(1_500)
+                await _pause(page, 1_500)
                 for frame in frames:
                     for sel in (
                         "[class*='toc'] li", "[class*='chapter'] li",
@@ -1549,7 +1654,7 @@ class LibbyDownloader:
                                     await clickable.click(timeout=3_000)
                                 else:
                                     await loc.nth(idx).click(timeout=3_000)
-                                await page.wait_for_timeout(1_500)
+                                await _pause(page, 1_500)
                                 navigated = True
                                 break
                             if navigated:
@@ -1562,7 +1667,7 @@ class LibbyDownloader:
                 if self._toc_frame is not None:
                     try:
                         await self._toc_frame.locator("body").press("Escape")
-                        await page.wait_for_timeout(800)
+                        await _pause(page, 800)
                     except Exception:
                         pass
             except Exception:
@@ -1599,7 +1704,7 @@ class LibbyDownloader:
                         break
                 if not prev_clicked:
                     break
-                await page.wait_for_timeout(500)
+                await _pause(page, 500)
 
         # ── Sweep forward: chapter-next with 15s-skip gap filling ────────────
         frontier = _seq_frontier(self.captured)
@@ -1633,7 +1738,7 @@ class LibbyDownloader:
             if not await click_btn(NEXT_CH):
                 break
 
-            await page.wait_for_timeout(2_000)
+            await _pause(page, 2_000)
             frontier = _seq_frontier(self.captured)
 
             if frontier <= prev_frontier:
@@ -1659,7 +1764,7 @@ class LibbyDownloader:
                             break
                     if clicks_done == 0:
                         break
-                    await page.wait_for_timeout(1_000)
+                    await _pause(page, 1_000)
 
     async def _fill_part_gap(self, page: Page, missing_parts: list[int]) -> None:
         """Fill a gap in captured parts using player UI navigation buttons.
@@ -1714,7 +1819,7 @@ class LibbyDownloader:
             print("    Warning: prev-chapter button not found — skipping gap fill")
             return
 
-        await page.wait_for_timeout(2_000)
+        await _pause(page, 2_000)
 
         # ── Step 2: 15-second skips until all missing parts are captured ──────
         # Click skip-forward self.skip_clicks times per batch then wait 1 s.
@@ -1745,7 +1850,7 @@ class LibbyDownloader:
                 pass
                 break
 
-            await page.wait_for_timeout(1_000)
+            await _pause(page, 1_000)
 
             if batch_num % 5 == 4:
                 captured_nums = {_part_number(p["filename"]) for p in self.captured}
@@ -1758,7 +1863,7 @@ class LibbyDownloader:
                 print(f"    Warning: still missing after {MAX_BATCHES} batches: {sorted(still_missing)}")
 
         # ── Step 3: click next-chapter to return past the gap ────────────────
-        await page.wait_for_timeout(1_000)
+        await _pause(page, 1_000)
         for frame in frames:
             for sel in NEXT_CH_SELECTORS:
                 try:
@@ -1773,7 +1878,7 @@ class LibbyDownloader:
                 continue
             break
 
-        await page.wait_for_timeout(2_000)
+        await _pause(page, 2_000)
 
     async def _advance_to_book_end(self, page: Page) -> None:
         """Advance through any audio parts that follow the last TOC chapter.
@@ -1854,7 +1959,7 @@ class LibbyDownloader:
                                 n_clicks = max(1, min(int(remaining / 15) + 2, 50))
                                 for _ in range(n_clicks):
                                     await loc.click(timeout=2_000)
-                                    await page.wait_for_timeout(150)
+                                    await _pause(page, 150)
                                 clicked = True
                                 break
                         except Exception:
@@ -1865,7 +1970,7 @@ class LibbyDownloader:
             if not clicked:
                 break
 
-            await page.wait_for_timeout(3_000)
+            await _pause(page, 3_000)
 
             if len(self.captured) > prev:
                 print(f"  Captured trailing part (total: {len(self.captured)})")
@@ -1914,7 +2019,7 @@ class LibbyDownloader:
 
             # Seek to 2 seconds into this part to ensure the request fires.
             await self._set_audio_time(page, cumulative + 2.0)
-            await page.wait_for_timeout(1_000)
+            await _pause(page, 1_000)
 
             # Wait up to 10 s for a NEW capture to arrive. Matching by filename
             # is unreliable because readingOrder hrefs can be URL-encoded or
@@ -1923,7 +2028,7 @@ class LibbyDownloader:
             for _ in range(20):
                 if len(self.captured) > prev:
                     break
-                await page.wait_for_timeout(500)
+                await _pause(page, 500)
 
             cumulative += duration
 
@@ -1943,7 +2048,7 @@ class LibbyDownloader:
             try:
                 print("  Reopening TOC to click through all chapters...")
                 await self._toc_btn.click(timeout=5_000)
-                await page.wait_for_timeout(2_000)
+                await _pause(page, 2_000)
 
                 # Find all clickable chapter entries.
                 chapter_containers = None
@@ -1985,7 +2090,7 @@ class LibbyDownloader:
                                 await clickable.click(timeout=3_000)
                             else:
                                 await container.click(timeout=3_000)
-                            await page.wait_for_timeout(1_500)
+                            await _pause(page, 1_500)
                         except Exception:
                             continue
 
@@ -2004,7 +2109,7 @@ class LibbyDownloader:
                             if self._toc_frame is not None:
                                 try:
                                     await self._toc_frame.locator("body").press("Escape")
-                                    await page.wait_for_timeout(800)
+                                    await _pause(page, 800)
                                 except Exception:
                                     pass
                             # Go back TWO chapters to land just before the gap.
@@ -2025,8 +2130,8 @@ class LibbyDownloader:
                                     else:
                                         continue
                                     break
-                                await page.wait_for_timeout(1_000)
-                            await page.wait_for_timeout(1_000)
+                                await _pause(page, 1_000)
+                            await _pause(page, 1_000)
                             # Skip forward in batches until the frontier advances.
                             for batch in range(300):
                                 if _seq_frontier(self.captured) > prev_frontier:
@@ -2050,11 +2155,11 @@ class LibbyDownloader:
                                         break
                                 if clicks_done == 0:
                                     break
-                                await page.wait_for_timeout(1_000)
+                                await _pause(page, 1_000)
                             # Reopen the TOC to continue the chapter loop.
                             try:
                                 await self._toc_btn.click(timeout=5_000)
-                                await page.wait_for_timeout(1_500)
+                                await _pause(page, 1_500)
                             except Exception:
                                 pass
 
@@ -2064,7 +2169,7 @@ class LibbyDownloader:
                 if self._toc_frame is not None:
                     try:
                         await self._toc_frame.locator("body").press("Escape")
-                        await page.wait_for_timeout(800)
+                        await _pause(page, 800)
                     except Exception:
                         pass
                 return
@@ -2087,7 +2192,7 @@ class LibbyDownloader:
                         btn = frame.get_by_role(role, name=label, exact=False)
                         if await btn.count() > 0:
                             await btn.first.click(timeout=5_000)
-                            await page.wait_for_timeout(1_500)
+                            await _pause(page, 1_500)
                             self._toc_btn = btn.first
                             self._toc_frame = frame
                             # Recurse once now that _toc_btn is set.
@@ -2165,12 +2270,12 @@ class LibbyDownloader:
                 for t in seek_targets:
                     prev = len(self.captured)
                     await self._set_audio_time(page, t)
-                    await page.wait_for_timeout(1_500)
+                    await _pause(page, 1_500)
                     # Give it a bit to emit requests
                     for _ in range(10):
                         if len(self.captured) > prev:
                             break
-                        await page.wait_for_timeout(300)
+                        await _pause(page, 300)
 
             # Final check; if still missing, do a granular scan as a last resort.
             final_nums = set(get_nums())
@@ -2241,14 +2346,14 @@ class LibbyDownloader:
         while pos < total:
             prev_captured = len(self.captured)
             await self._set_audio_time(page, pos)
-            await page.wait_for_timeout(2_000)
+            await _pause(page, 2_000)
             if len(self.captured) > prev_captured:
                 print(f"    At {pos/60:.1f} min: {len(self.captured)} part(s) captured")
             pos += step_sec
 
         # Seek near the very end to catch the last part.
         await self._set_audio_time(page, max(0.0, total - 10))
-        await page.wait_for_timeout(2_000)
+        await _pause(page, 2_000)
 
 
     async def _set_audio_time(self, page: Page, seconds: float) -> None:
@@ -2316,7 +2421,7 @@ class LibbyDownloader:
         expected = self.total_book_duration
 
         if expected <= 0:
-            await page.wait_for_timeout(1_000)
+            await _pause(page, 1_000)
             frames = [page.main_frame] + [f for f in page.frames if f is not page.main_frame]
             for frame in frames:
                 try:
@@ -2376,7 +2481,7 @@ class LibbyDownloader:
             f"({diff_display}s missing)"
         )
 
-    async def _download_all(self, book_name: str) -> None:
+    async def _download_all(self, page: Page, book_name: str) -> None:
         print(f"\nDownloading {len(self.captured)} file(s) -> {self.output_dir.resolve()}/")
 
         cover_path = self.output_dir / "coverArt.jpg"
@@ -2399,31 +2504,36 @@ class LibbyDownloader:
 
         total = len(self.captured)
         for i, part in enumerate(self.captured, 1):
+            if i > 1:
+                await asyncio.sleep(random.uniform(3, 12))  # don't pull every part back-to-back
             part_label = _part_label(part["filename"], i)
             out_name = f"{book_name}-{part_label}.mp3"
             out_path = self.output_dir / out_name
             print(f"  [{i}/{total}] {out_name}")
 
             try:
-                # Strip range/partial-content headers so the server sends
-                # the full file rather than a byte-range slice.
-                clean_headers = {
-                    k: v for k, v in part["headers"].items()
-                    if k.lower() not in ("range", "if-range")
-                }
-                resp = requests.get(
-                    part["url"],
-                    headers=clean_headers,
-                    allow_redirects=True,
-                    timeout=300,
-                    stream=True,
-                )
-                ct = resp.headers.get("content-type", "")
-                # Accept 200 (full) and 206 (partial — normal for audio streaming).
-                if resp.status_code in (200, 206) and "audio" in ct:
-                    with open(out_path, "wb") as f:
-                        for chunk in resp.iter_content(chunk_size=8_192):
-                            f.write(chunk)
+                ok = await self._browser_download(page, part["url"], out_path)
+                if not ok:
+                    print("    Browser fetch failed; downloading directly instead.")
+                    # Strip range/partial-content headers so the server sends
+                    # the full file rather than a byte-range slice.
+                    resp = requests.get(
+                        part["url"],
+                        headers=_strip_range(part["headers"]),
+                        allow_redirects=True,
+                        timeout=300,
+                        stream=True,
+                    )
+                    ct = resp.headers.get("content-type", "")
+                    # Accept 200 (full) and 206 (partial — normal for audio streaming).
+                    ok = resp.status_code in (200, 206) and "audio" in ct
+                    if ok:
+                        with open(out_path, "wb") as f:
+                            for chunk in resp.iter_content(chunk_size=8_192):
+                                f.write(chunk)
+                    else:
+                        print(f"    WARNING: {resp.status_code} / {ct}")
+                if ok:
                     _apply_id3(
                         out_path,
                         track=i,
@@ -2432,8 +2542,6 @@ class LibbyDownloader:
                         metadata=self.metadata,
                         cover=cover_path if cover_path.exists() else None,
                     )
-                else:
-                    print(f"    WARNING: {resp.status_code} / {ct}")
             except Exception as e:
                 print(f"    ERROR: {e}")
 
@@ -2722,8 +2830,44 @@ def _format_hms_duration(hms: str) -> str:
     return f"{h}h {m}m" if h else f"{m}m"
 
 
+# Runs in the page: one Range request, body returned as base64 (FileReader is
+# far faster than building the string by hand for multi-MB chunks).
+_RANGE_FETCH_JS = """async ([url, start, end]) => {
+    const r = await fetch(url, {headers: {Range: `bytes=${start}-${end}`}, credentials: 'include'});
+    const out = {status: r.status, ct: r.headers.get('content-type') || '',
+                 cr: r.headers.get('content-range') || '', b64: ''};
+    if (r.status !== 200 && r.status !== 206) return out;
+    const blob = await r.blob();
+    out.b64 = await new Promise((ok, err) => {
+        const fr = new FileReader();
+        fr.onload = () => ok(fr.result.slice(fr.result.indexOf(',') + 1));
+        fr.onerror = err;
+        fr.readAsDataURL(blob);
+    });
+    return out;
+}"""
+
+
+def _strip_range(headers: dict) -> dict:
+    return {k: v for k, v in headers.items() if k.lower() not in ("range", "if-range")}
+
+
+async def _pause(page: Page, ms: float) -> None:
+    # Only ever lengthened: the fixed waits are tuned minimums, but identical
+    # gaps on every run look scripted.
+    await page.wait_for_timeout(ms * random.uniform(1.0, 1.5))
+
+
+def _swap_part_number(url: str, n: int) -> Optional[str]:
+    """'...-PART01.MP3?x' -> '...-PART07.MP3?x' (keeps case and zero-padding)."""
+    path, sep, query = url.partition("?")
+    new, count = re.subn(r"(part)(\d+)(\.mp3)$",
+                         lambda m: f"{m[1]}{n:0{len(m[2])}d}{m[3]}", path, flags=re.I)
+    return new + sep + query if count else None
+
+
 def _part_number(filename: str) -> int:
-    m = re.search(r"[Pp]art0*(\d+)", filename)
+    m = re.search(r"part0*(\d+)", filename, re.I)
     return int(m.group(1)) if m else 0
 
 
@@ -2812,7 +2956,7 @@ def _part_label(filename: str, fallback_index: int) -> str:
     '%7B...%7DFmt425-Part02.mp3'  ->  'Part02'
     Falls back to 'PartNN' using the capture order index.
     """
-    m = re.search(r"[Pp]art(\d+)", filename)
+    m = re.search(r"part(\d+)", filename, re.I)
     if m:
         return f"Part{m.group(1).zfill(2)}"
     return f"Part{fallback_index:02d}"
