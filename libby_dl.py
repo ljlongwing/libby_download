@@ -98,6 +98,9 @@ class LibbyDownloader:
         # mean every part was actually captured.
         self.duration_ok: bool = True
         self.duration_warning: str = ""
+        # Set when OverDrive answers 403 {"result":"whoa"}; stops the loop
+        # instead of hammering the API and prolonging the block.
+        self._throttled: bool = False
 
     # ------------------------------------------------------------------
     # Entry point
@@ -312,6 +315,7 @@ class LibbyDownloader:
         self._toc_frame = None
         self.duration_ok = True
         self.duration_warning = ""
+        self._throttled = False
 
     async def _download_selected_book(self, page, context, player_page, book: dict) -> None:
         """Download one book (a shelf entry dict from _get_shelf) using an
@@ -759,6 +763,20 @@ class LibbyDownloader:
         if not refusals and "card-review" not in page.url:
             return
         reason = refusals[-1] if refusals else f"redirected to {page.url}"
+
+        # OverDrive answers 403 with {"result":"whoa"} when it wants the
+        # client to back off. It is a rate-limit / anti-automation block, NOT
+        # a suspended library card -- telling the user to check their card
+        # (the old behaviour for every 403) sent them down the wrong path.
+        if any("whoa" in r.lower() for r in refusals):
+            raise RuntimeError(
+                f"Libby is rate-limiting this client for '{book['title']}' "
+                "(HTTP 403 'whoa'). That is an anti-automation throttle by "
+                "OverDrive, not a problem with the loan or the library card. "
+                "Stop using the downloader for a while (often hours) -- "
+                "retrying immediately keeps the block alive."
+            )
+
         suspended = "card-review" in page.url or reason.startswith("HTTP 403")
         hint = (
             " -- Libby reports this library card as SUSPENDED. "
@@ -1110,10 +1128,15 @@ class LibbyDownloader:
                 const rows = [];
                 const seen = new Set();
                 const blacklist = [
-                    'close', 'back', 'playback speed', 'sleep timer', 'bookmarks', 
-                    'place bookmark', 'about this audiobook', 'libby', 'now reading',
-                    'search', 'library', 'menu', 'shelf', 'tags', 'open this title',
-                    'audiobook', 'listening', 'player', 'loading'
+                    'close', 'back', 'playback speed', 'sleep timer', 'sleep-timer',
+                    'bookmarks', 'place bookmark', 'about this audiobook', 'libby',
+                    'now reading', 'search', 'library', 'menu', 'shelf', 'tags',
+                    'open this title', 'audiobook', 'listening', 'player', 'loading',
+                    // Libby localizes the player menu; the English-only list
+                    // let German menu rows ("Geschwindigkeit", "Sleep-Timer",
+                    // "Lesezeichen") through as fake chapters.
+                    'hörbuch schließen', 'geschwindigkeit',
+                    'wiedergabegeschwindigkeit', 'schlaf-timer', 'lesezeichen'
                 ];
 
                 const rawCandidates = [
@@ -1192,15 +1215,31 @@ class LibbyDownloader:
             }
         """
 
-        chapters = []
+        # Evaluate the scraper in EVERY frame and keep the best result.
+        # The player runs in an iframe, while the surrounding shell also has
+        # list-like elements (the player menu: "Close audiobook", "Playback
+        # speed", "Sleep timer", "Bookmarks"...). Stopping at the first frame
+        # that returned anything often picked those menu rows instead of the
+        # real TOC in the player frame -- that is where the bogus
+        # "Sleep-Timer" chapter came from. Prefer the result with the most
+        # timestamped rows; menu entries carry no timestamp.
+        def _score(rows: list) -> tuple[int, int]:
+            timed = sum(1 for r in rows if (r.get("timestamp") or "").strip())
+            return timed, len(rows)
+
+        chapters: list = []
+        best_score = (0, 0)
         for frame in frames:
             try:
                 rows = await frame.evaluate(toc_js)
-                if rows and len(rows) > 0:
-                    chapters = rows
-                    break
             except Exception:
                 continue
+            if not rows:
+                continue
+            score = _score(rows)
+            if score > best_score:
+                best_score = score
+                chapters = rows
 
         # NOW extract metadata from "About" panel while TOC is open.
         await self._extract_about_panel(page, frames)
@@ -1221,6 +1260,14 @@ class LibbyDownloader:
             if (t, ts) in seen_ch: continue
             seen_ch.add((t, ts))
             final_chapters.append(ch)
+
+        # Real chapter rows always show a time/duration; the player's menu
+        # entries ("Sleep-Timer", "Geschwindigkeit", ...) don't. If we got any
+        # timed rows at all, drop the untimed ones.
+        timed = [ch for ch in final_chapters if (ch.get("timestamp") or "").strip()]
+        if timed and len(timed) < len(final_chapters):
+            print(f"  Ignoring {len(final_chapters) - len(timed)} menu/UI row(s) without a timestamp.")
+            final_chapters = timed
 
         if not final_chapters:
             print("  Warning: could not find chapters in TOC panel.")
@@ -1258,7 +1305,10 @@ class LibbyDownloader:
                 for i in range(min(count, 5)):
                     row = rows.nth(i)
                     txt = (await row.text_content()).lower()
-                    if "about this" in txt or "sleep" in txt or "speed" in txt: continue
+                    if any(s in txt for s in (
+                        "about this", "sleep", "speed", "geschwindigkeit",
+                        "lesezeichen", "hörbuch schließen",
+                    )): continue
                     clickable = row.locator("a, button, [role='button']").first
                     if await clickable.count() > 0:
                         await clickable.click(timeout=5_000)
@@ -1744,10 +1794,44 @@ class LibbyDownloader:
             if frontier <= prev_frontier:
                 # The chapter jump skipped a part — skip forward to fill the gap.
                 print(f"  Filling gap at Part {prev_frontier + 1}...")
-                for batch in range(300):
+                gap_skips = 0
+                gap_prev_pos: Optional[int] = None
+                gap_stalled = 0
+                for batch in range(60):
                     frontier = _seq_frontier(self.captured)
                     if frontier > prev_frontier:
                         break
+
+                    # Never skip forward past the end of the book: once the
+                    # player is at the end, the missing part lies *behind* us
+                    # and only seeking back can fetch it. Without this check
+                    # the loop pressed the 15-second button 20x per batch for
+                    # up to 300 batches at the end ("kept clicking even though
+                    # it was already at the end").
+                    remaining = 0
+                    pos: Optional[int] = None
+                    for frame in frames:
+                        try:
+                            result = await frame.evaluate(_TIMELINE_JS)
+                        except Exception:
+                            continue
+                        if result and isinstance(result, dict):
+                            remaining = _parse_timeline_seconds(result.get("end"))
+                            pos = _parse_timeline_seconds(result.get("start"))
+                            break
+                    if pos is not None and remaining <= 30:
+                        print("  Reached end of book; gap will be filled by seeking back later.")
+                        break
+                    if pos is not None and gap_prev_pos is not None:
+                        if pos <= gap_prev_pos:
+                            gap_stalled += 1
+                            if gap_stalled >= 2:
+                                print("  Skip-forward is not advancing; stopping gap fill.")
+                                break
+                        else:
+                            gap_stalled = 0
+                    gap_prev_pos = pos
+
                     clicks_done = 0
                     for frame in frames:
                         for sel in SKIP_FWD:
@@ -1755,7 +1839,10 @@ class LibbyDownloader:
                                 loc = frame.locator(sel).first
                                 if await loc.count() > 0 and await loc.is_visible(timeout=1_000):
                                     for _ in range(self.skip_clicks):
+                                        if gap_skips >= 900:
+                                            break
                                         await loc.click(timeout=2_000)
+                                        gap_skips += 1
                                         clicks_done += 1
                                     break
                             except Exception:
@@ -1764,7 +1851,17 @@ class LibbyDownloader:
                             break
                     if clicks_done == 0:
                         break
+                    if gap_skips >= 900:
+                        print("  Stopping gap fill at the safety limit.")
+                        break
                     await _pause(page, 1_000)
+
+                # Forward navigation is exhausted; stop instead of jumping
+                # through the remaining chapter buttons at the end.
+                if _seq_frontier(self.captured) <= prev_frontier:
+                    print("  Gap could not be filled by skipping forward; "
+                          "leaving it to the seek-back step.")
+                    break
 
     async def _fill_part_gap(self, page: Page, missing_parts: list[int]) -> None:
         """Fill a gap in captured parts using player UI navigation buttons.
@@ -1917,31 +2014,82 @@ class LibbyDownloader:
 
         print("  Checking for content beyond last TOC chapter...")
 
-        for attempt in range(40):  # up to 40 nav clicks max
-            # ── Read current timeline position ─────────────────────────────
-            remaining = 0
+        # Safety valves. At the end of the book Libby can leave the "time
+        # remaining" clock frozen (or another frame's/mini-player's clock can
+        # shadow the real one). The old loop then pressed the 15-second button
+        # up to 50 times per round for 40 rounds -- minutes of clicking that
+        # could never make progress. Track the position and stop as soon as
+        # clicking stops moving it, plus a hard click budget.
+        MAX_TOTAL_SKIPS = 600
+        total_skips = 0
+        prev_pos: Optional[int] = None
+        stalled = 0
+        control_frame = None
+
+        async def find_control_frame():
             for frame in frames:
+                for sel in NEXT_CH_SELECTORS + SKIP_FWD_SELECTORS:
+                    try:
+                        loc = frame.locator(sel).first
+                        if await loc.count() > 0 and await loc.is_visible(timeout=300):
+                            return frame
+                    except Exception:
+                        continue
+            return None
+
+        async def read_clock() -> tuple[int, Optional[int]]:
+            order = ([control_frame] if control_frame is not None else []) + [
+                f for f in frames if f is not control_frame
+            ]
+            for frame in order:
                 try:
                     result = await frame.evaluate(_TIMELINE_JS)
-                    if result and isinstance(result, dict):
-                        remaining = _parse_timeline_seconds(result.get("end"))
-                        break
                 except Exception:
                     continue
+                if result and isinstance(result, dict):
+                    return (
+                        _parse_timeline_seconds(result.get("end")),
+                        _parse_timeline_seconds(result.get("start")),
+                    )
+            return 0, None
+
+        for attempt in range(40):  # up to 40 nav clicks max
+            if total_skips >= MAX_TOTAL_SKIPS:
+                print(f"  Stopping after {total_skips} 15-second skips (safety limit).")
+                break
+            if control_frame is None:
+                control_frame = await find_control_frame()
+            click_frames = ([control_frame] if control_frame is not None else []) + [
+                f for f in frames if f is not control_frame
+            ]
+
+            # ── Read current timeline position ─────────────────────────────
+            remaining, pos = await read_clock()
 
             if remaining <= THRESHOLD:
                 break
+
+            if pos is not None and prev_pos is not None:
+                if pos <= prev_pos + 5:
+                    stalled += 1
+                    if stalled >= 2:
+                        print("  Position is no longer advancing — assuming end of book.")
+                        break
+                else:
+                    stalled = 0
+            prev_pos = pos
 
             prev = len(self.captured)
 
             # ── Strategy 1: click the next-chapter button ───────────────────
             clicked = False
-            for frame in frames:
+            for frame in click_frames:
                 for sel in NEXT_CH_SELECTORS:
                     try:
                         loc = frame.locator(sel).first
                         if await loc.count() > 0 and await loc.is_visible(timeout=1_000):
                             await loc.click(timeout=3_000)
+                            control_frame = frame
                             clicked = True
                             break
                     except Exception:
@@ -1951,14 +2099,17 @@ class LibbyDownloader:
 
             # ── Strategy 2: 15-second skip-forward button ───────────────────
             if not clicked:
-                for frame in frames:
+                for frame in click_frames:
                     for sel in SKIP_FWD_SELECTORS:
                         try:
                             loc = frame.locator(sel).first
                             if await loc.count() > 0 and await loc.is_visible(timeout=1_000):
-                                n_clicks = max(1, min(int(remaining / 15) + 2, 50))
+                                control_frame = frame
+                                n_clicks = max(1, min(int(remaining / 15) + 2, 30))
+                                n_clicks = min(n_clicks, MAX_TOTAL_SKIPS - total_skips)
                                 for _ in range(n_clicks):
                                     await loc.click(timeout=2_000)
+                                    total_skips += 1
                                     await _pause(page, 150)
                                 clicked = True
                                 break
@@ -1966,6 +2117,10 @@ class LibbyDownloader:
                             continue
                     if clicked:
                         break
+
+            if total_skips >= MAX_TOTAL_SKIPS:
+                print(f"  Stopping after {total_skips} 15-second skips (safety limit).")
+                break
 
             if not clicked:
                 break
@@ -2475,6 +2630,9 @@ class LibbyDownloader:
             return
 
         print(f"Warning: {diff_display}s of audio unaccounted for — some parts may be missing.")
+        if self._throttled:
+            print("The download was stopped by OverDrive's 403 'whoa' rate limit; "
+                  "wait before retrying. Parts already fetched are kept.")
         self.duration_ok = False
         self.duration_warning = (
             f"Incomplete: got {_fmt_hms(actual)} of {_fmt_hms(expected)} expected "
@@ -2504,6 +2662,8 @@ class LibbyDownloader:
 
         total = len(self.captured)
         for i, part in enumerate(self.captured, 1):
+            if self._throttled:
+                break
             if i > 1:
                 await asyncio.sleep(random.uniform(3, 12))  # don't pull every part back-to-back
             part_label = _part_label(part["filename"], i)
@@ -2511,8 +2671,19 @@ class LibbyDownloader:
             out_path = self.output_dir / out_name
             print(f"  [{i}/{total}] {out_name}")
 
+            # A previous run may have completed some parts before being
+            # throttled; don't fetch them all over again.
+            if _is_complete_mp3(out_path):
+                print("    Already present — skipping.")
+                continue
+
+            # Download to a .part file and only rename on success, so a
+            # failed/aborted transfer can't leave a truncated MP3 that looks
+            # like a finished chapter on the next run.
+            tmp_path = out_path.with_name(out_path.name + ".part")
+
             try:
-                ok = await self._browser_download(page, part["url"], out_path)
+                ok = await self._browser_download(page, part["url"], tmp_path)
                 if not ok:
                     print("    Browser fetch failed; downloading directly instead.")
                     # Strip range/partial-content headers so the server sends
@@ -2528,12 +2699,27 @@ class LibbyDownloader:
                     # Accept 200 (full) and 206 (partial — normal for audio streaming).
                     ok = resp.status_code in (200, 206) and "audio" in ct
                     if ok:
-                        with open(out_path, "wb") as f:
+                        with open(tmp_path, "wb") as f:
                             for chunk in resp.iter_content(chunk_size=8_192):
                                 f.write(chunk)
                     else:
-                        print(f"    WARNING: {resp.status_code} / {ct}")
+                        try:
+                            body = resp.text[:500]
+                        except Exception:
+                            body = ""
+                        if resp.status_code == 403 and '"whoa"' in body:
+                            print("    ERROR: Libby is rate-limiting this client (403 'whoa').")
+                            print("    Stopping to avoid a longer block — wait before retrying.")
+                            self._throttled = True
+                            self.duration_ok = False
+                            self.duration_warning = (
+                                "Stopped early: OverDrive rate limit (403 'whoa')"
+                            )
+                        else:
+                            print(f"    WARNING: {resp.status_code} / {ct}")
+                        resp.close()
                 if ok:
+                    tmp_path.replace(out_path)
                     _apply_id3(
                         out_path,
                         track=i,
@@ -2542,7 +2728,10 @@ class LibbyDownloader:
                         metadata=self.metadata,
                         cover=cover_path if cover_path.exists() else None,
                     )
+                else:
+                    tmp_path.unlink(missing_ok=True)
             except Exception as e:
+                tmp_path.unlink(missing_ok=True)
                 print(f"    ERROR: {e}")
 
     # ------------------------------------------------------------------
@@ -2698,8 +2887,15 @@ class LibbyDownloader:
         if not self.toc:
             print("No TOC data; skipping chapter splitting.")
             return
+        if not self.duration_ok:
+            print("Download is incomplete; skipping chapter splitting "
+                  "(rerun once the rate limit has cleared).")
+            return
 
         all_chapters = self._build_chapter_list(book_name)
+        if len(all_chapters) < 2 or len({c["offset"] for c in all_chapters}) < 2:
+            print("TOC has no usable chapter offsets; skipping chapter splitting.")
+            return
 
         from collections import defaultdict
         by_file: dict[str, list] = defaultdict(list)
@@ -2871,6 +3067,14 @@ def _part_number(filename: str) -> int:
     return int(m.group(1)) if m else 0
 
 
+def _is_complete_mp3(path: Path) -> bool:
+    """True if path looks like a finished part (non-trivial size + valid MP3)."""
+    try:
+        return path.stat().st_size > 100_000 and float(MP3(path).info.length) > 0
+    except Exception:
+        return False
+
+
 def _seq_frontier(captured: list) -> int:
     """Return the highest N such that parts 1..N are ALL present in captured.
 
@@ -2912,8 +3116,10 @@ def _safe(s: str) -> str:
         return "Unknown"
     # Replace newlines/tabs with space
     s = re.sub(r"[\r\n\t]+", " ", s)
-    # Keep only safe chars
-    s = re.sub(r"[^ a-zA-Z0-9\-.]", "", s)
+    # Keep letters/digits (including umlauts and other non-ASCII letters),
+    # spaces, dashes and dots -- the old ASCII-only filter mangled German
+    # titles ("Hörbuch" -> "Hrbuch").
+    s = re.sub(r"[^\w \-.]", "", s, flags=re.UNICODE)
     # Collapse multiple spaces
     s = " ".join(s.split())
     # Limit to 80 chars to be safe on all OSs
