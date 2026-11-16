@@ -219,3 +219,7 @@ Every time you run a script after that, it will:
 2. **Downloading**: Fabuly books come from the public bucket (`--enhanced` for the premium narration); LibriVox books come from the public per-book JSON, whose section URLs point straight at archive.org. No player, no login, no capture.
 3. **Chapter titles**: For Fabuly books it parses the book's data blob (the app's read-along data); for LibriVox books the section titles are in the JSON. Both sources give one audio file per chapter/section.
 4. **Organizing**: It tags each part with title, author, narrator, and cover art. The parts are already one-per-chapter (no splitting needed), and the `.cue` it writes is just a combined chapter index.
+
+## Contributing
+
+PRs are welcome, including AI-assisted ones. See [CONTRIBUTING.md](CONTRIBUTING.md).
