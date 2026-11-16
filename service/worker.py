@@ -206,6 +206,17 @@ async def scan_once(source: str) -> dict:
                                     # reported as a clean "complete" (a book that only
                                     # captured 1 of 11 parts was previously shown as
                                     # complete in the dashboard).
+                                    if getattr(downloader, "_throttled", False):
+                                        # 403 'whoa': not downloaded (so the next scan
+                                        # resumes it) and no more books this scan --
+                                        # every request now prolongs the block.
+                                        logger.warning("[%s] Rate-limited (403 'whoa') on %r; stopping this scan.", source, title)
+                                        db.upsert_book(
+                                            source, loan_id, title, author, status="failed", card_id=card_id,
+                                            error=downloader.duration_warning, output_path=str(downloader.output_dir),
+                                        )
+                                        failed += 1
+                                        break
                                     if getattr(downloader, "duration_ok", True):
                                         db.upsert_book(
                                             source, loan_id, title, author, status="complete", card_id=card_id,
@@ -227,6 +238,9 @@ async def scan_once(source: str) -> dict:
                                         source, loan_id, title, author, status="failed", card_id=card_id, error=str(e),
                                     )
                                     failed += 1
+                                    if getattr(downloader, "_throttled", False):
+                                        logger.warning("[%s] Rate-limited (403 'whoa'); stopping this scan.", source)
+                                        break
                     finally:
                         # Only overwrite the saved session if it's still
                         # good -- persisting an expired/logged-out state

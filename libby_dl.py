@@ -769,6 +769,7 @@ class LibbyDownloader:
         # a suspended library card -- telling the user to check their card
         # (the old behaviour for every 403) sent them down the wrong path.
         if any("whoa" in r.lower() for r in refusals):
+            self._throttled = True
             raise RuntimeError(
                 f"Libby is rate-limiting this client for '{book['title']}' "
                 "(HTTP 403 'whoa'). That is an anti-automation throttle by "
@@ -1635,6 +1636,9 @@ class LibbyDownloader:
                     return False
                 if r["status"] == 416 and pos > 0:  # size was an exact multiple of CHUNK
                     break
+                if r["status"] == 403 and '"whoa"' in r.get("body", ""):
+                    self._mark_throttled()
+                    return False
                 if r["status"] not in (200, 206) or "audio" not in r["ct"]:
                     return False
                 data = base64.b64decode(r["b64"])
@@ -2639,6 +2643,13 @@ class LibbyDownloader:
             f"({diff_display}s missing)"
         )
 
+    def _mark_throttled(self) -> None:
+        print("    ERROR: Libby is rate-limiting this client (403 'whoa').")
+        print("    Stopping to avoid a longer block — wait before retrying.")
+        self._throttled = True
+        self.duration_ok = False
+        self.duration_warning = "Stopped early: OverDrive rate limit (403 'whoa')"
+
     async def _download_all(self, page: Page, book_name: str) -> None:
         print(f"\nDownloading {len(self.captured)} file(s) -> {self.output_dir.resolve()}/")
 
@@ -2664,18 +2675,18 @@ class LibbyDownloader:
         for i, part in enumerate(self.captured, 1):
             if self._throttled:
                 break
-            if i > 1:
-                await asyncio.sleep(random.uniform(3, 12))  # don't pull every part back-to-back
             part_label = _part_label(part["filename"], i)
             out_name = f"{book_name}-{part_label}.mp3"
             out_path = self.output_dir / out_name
             print(f"  [{i}/{total}] {out_name}")
 
             # A previous run may have completed some parts before being
-            # throttled; don't fetch them all over again.
+            # throttled; don't fetch them all over again (or wait for them).
             if _is_complete_mp3(out_path):
                 print("    Already present — skipping.")
                 continue
+            if i > 1:
+                await asyncio.sleep(random.uniform(3, 12))  # don't pull every part back-to-back
 
             # Download to a .part file and only rename on success, so a
             # failed/aborted transfer can't leave a truncated MP3 that looks
@@ -2684,7 +2695,7 @@ class LibbyDownloader:
 
             try:
                 ok = await self._browser_download(page, part["url"], tmp_path)
-                if not ok:
+                if not ok and not self._throttled:
                     print("    Browser fetch failed; downloading directly instead.")
                     # Strip range/partial-content headers so the server sends
                     # the full file rather than a byte-range slice.
@@ -2708,13 +2719,7 @@ class LibbyDownloader:
                         except Exception:
                             body = ""
                         if resp.status_code == 403 and '"whoa"' in body:
-                            print("    ERROR: Libby is rate-limiting this client (403 'whoa').")
-                            print("    Stopping to avoid a longer block — wait before retrying.")
-                            self._throttled = True
-                            self.duration_ok = False
-                            self.duration_warning = (
-                                "Stopped early: OverDrive rate limit (403 'whoa')"
-                            )
+                            self._mark_throttled()
                         else:
                             print(f"    WARNING: {resp.status_code} / {ct}")
                         resp.close()
@@ -2887,7 +2892,7 @@ class LibbyDownloader:
         if not self.toc:
             print("No TOC data; skipping chapter splitting.")
             return
-        if not self.duration_ok:
+        if self._throttled:
             print("Download is incomplete; skipping chapter splitting "
                   "(rerun once the rate limit has cleared).")
             return
@@ -3032,6 +3037,7 @@ _RANGE_FETCH_JS = """async ([url, start, end]) => {
     const r = await fetch(url, {headers: {Range: `bytes=${start}-${end}`}, credentials: 'include'});
     const out = {status: r.status, ct: r.headers.get('content-type') || '',
                  cr: r.headers.get('content-range') || '', b64: ''};
+    if (r.status === 403) out.body = (await r.text()).slice(0, 500);
     if (r.status !== 200 && r.status !== 206) return out;
     const blob = await r.blob();
     out.b64 = await new Promise((ok, err) => {
